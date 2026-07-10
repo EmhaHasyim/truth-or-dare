@@ -1,0 +1,21 @@
+{
+  "projectName": "truth-or-dare",
+  "mode": "file-router",
+  "typescript": true,
+  "packageManager": "npm",
+  "includeExamples": false,
+  "tailwind": true,
+  "addOnOptions": {},
+  "envVarValues": {},
+  "git": false,
+  "install": true,
+  "routerOnly": false,
+  "version": 1,
+  "framework": "solid",
+  "chosenAddOns": [
+    "cloudflare",
+    "t3env",
+    "tanstack-query",
+    "store"
+  ]
+}

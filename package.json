@@ -1,0 +1,56 @@
+{
+  "name": "truth-or-dare",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "generate-routes": "tsr generate",
+    "build": "vite build",
+    "preview": "vite build && wrangler dev",
+    "test": "vitest run",
+    "deploy": "npm run build && wrangler deploy",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 execute truth-or-dare-db --local --file=migrations/0000_consolidated/migration.sql",
+    "db:seed:local": "wrangler d1 execute truth-or-dare-db --local --file=migrations/seed.sql",
+    "db:studio": "drizzle-kit studio",
+    "db:reset:local": "wrangler d1 execute truth-or-dare-db --local --command=\"DELETE FROM rooms; DELETE FROM players; DELETE FROM games; DELETE FROM turns;\" && npm run db:migrate:local && npm run db:seed:local",
+    "db:setup:local": "npm run db:generate && npm run db:migrate:local && npm run db:seed:local"
+  },
+  "dependencies": {
+    "@cloudflare/vite-plugin": "^1.42.2",
+    "@hono/zod-validator": "^0.8.0",
+    "@tailwindcss/vite": "^4.1.18",
+    "@tanstack/solid-query": "^5.101.1",
+    "@tanstack/solid-router": "^1.170.16",
+    "canvas-confetti": "^1.9.4",
+    "drizzle-orm": "^1.0.0-rc.4-5d5b77c",
+    "hono": "^4.12.27",
+    "lucide-solid": "^1.21.0",
+    "solid-js": "^1.9.12",
+    "solid-transition-group": "^0.3.0",
+    "tailwindcss": "^4.1.18",
+    "theme-change": "^3.0.4",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260625.1",
+    "@tanstack/devtools-vite": "^0.8.1",
+    "@tanstack/router-cli": "^1.133.21",
+    "@types/canvas-confetti": "^1.9.0",
+    "@types/node": "^26.0.1",
+    "daisyui": "^5.5.23",
+    "drizzle-kit": "^1.0.0-rc.4-ca0f029",
+    "jsdom": "^28.1.0",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.0",
+    "vite-plugin-solid": "^2.11.12",
+    "vitest": "^4.1.5",
+    "wrangler": "^4.70.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "lightningcss"
+    ]
+  }
+}

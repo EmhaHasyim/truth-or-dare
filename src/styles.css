@@ -1,0 +1,225 @@
+@import 'tailwindcss';
+@plugin 'daisyui' {
+  themes: cupcake --default, dark --prefersdark, autumn, forest, aqua, valentine;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #app {
+  min-height: 100svh;
+}
+/* Fallback: 100dvh jika didukung (lebih akurat di mobile dengan toolbar dinamis) */
+@supports (min-height: 100dvh) {
+  html, body, #app {
+    min-height: 100dvh;
+  }
+}
+
+html {
+  touch-action: manipulation;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  overflow-x: hidden;
+}
+
+/* ── Better scrollbar (mobile-friendly) ── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+*:hover {
+  scrollbar-color: oklch(var(--b3)) transparent;
+}
+*::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+*::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 99px;
+}
+*:hover::-webkit-scrollbar-thumb {
+  background: oklch(var(--b3));
+}
+
+/* ── Prevent text selection on interactive elements ── */
+.btn, .card, .input, textarea, select, [role="button"], .modal-box {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+input, textarea, .selectable-text {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* ── Spring easing for smooth animations ── */
+:root {
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ── Phase: fade in / slide up ── */
+.phase-fade-in {
+  animation: fadeIn 0.35s var(--ease-out);
+}
+
+.phase-slide-up {
+  animation: slideUp 0.4s var(--ease-spring);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ── Page route transitions ── */
+.page-enter-active {
+  animation: pageEnter 0.35s var(--ease-spring);
+}
+.page-exit-active {
+  animation: pageExit 0.15s ease-in;
+}
+
+@keyframes pageEnter {
+  0%   { opacity: 0; transform: translateY(16px) scale(0.97); filter: blur(4px); }
+  60%  { opacity: 1; transform: translateY(-2px) scale(1.002); filter: blur(0); }
+  100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+@keyframes pageExit {
+  from { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+  to   { opacity: 0; transform: translateY(-8px) scale(0.97); filter: blur(2px); }
+}
+
+/* ── View transitions ── */
+.view-transition-enter-active {
+  animation: viewEnter 0.35s var(--ease-spring);
+}
+.view-transition-exit-active {
+  animation: viewExit 0.12s ease-in;
+}
+
+@keyframes viewEnter {
+  from { opacity: 0; transform: translateY(14px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes viewExit {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to   { opacity: 0; transform: translateY(-8px) scale(0.96); }
+}
+
+/* ── Toast slide-up ── */
+.animate-slide-up-toast {
+  animation: slideUpToast 0.35s var(--ease-spring);
+}
+
+@keyframes slideUpToast {
+  from { opacity: 0; transform: translateY(16px) scale(0.92); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ── Progress bar ── */
+.progress-countdown {
+  animation: shrink 2.8s linear forwards;
+}
+@keyframes shrink {
+  from { width: 100%; }
+  to { width: 0%; }
+}
+
+/* ── Scale press effect for buttons ── */
+.btn:active {
+  transform: scale(0.97) !important;
+}
+
+/* ── Card hover ── */
+.card-hover {
+  transition: transform 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
+}
+.card-hover:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 12px 28px rgba(0,0,0,0.08);
+}
+.card-hover:active {
+  transform: scale(0.97);
+}
+
+/* ── Glass effect ── */
+.glass-panel {
+  background: rgba(255,255,255,0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+[data-theme="dark"] .glass-panel {
+  background: rgba(0,0,0,0.3);
+}
+
+/* ── Optimize animated elements for GPU ── */
+.card-hover,
+.phase-fade-in,
+.phase-slide-up {
+  will-change: transform, opacity;
+}
+
+/* ── Pulse dot ── */
+.pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* ── Gradient text ── */
+.gradient-text {
+  background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Shimmer loading ── */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.shimmer {
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.15) 50%, transparent 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* ── Keyboard avoid ── */
+@media (max-width: 768px) {
+  input, textarea, select, [contenteditable] {
+    font-size: 16px !important;
+  }
+}
+
+/* ── Respect reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
