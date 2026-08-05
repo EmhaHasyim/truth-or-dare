@@ -1,19 +1,13 @@
 import { DurableObject } from 'cloudflare:workers'
 import { eq } from 'drizzle-orm'
-import { drizzle } from 'drizzle-orm/d1'
-import { z } from 'zod'
+import { createDb, type DbInstance } from '../db'
 import type { ServerMessage } from '../types/ws'
 import type { Bindings } from '../types'
 import * as schema from '../db/schema'
+import { clientMessageSchema } from '../types/ws-validation'
 import { fisherYatesShuffle } from '../lib/shuffle'
-import { EMPTY_ROOM_TIMEOUT, EMPTY_ROOM_CHECK_INTERVAL, MAX_ROUNDS, TURN_TIMEOUT_MS, DISCONNECT_GRACE_MS } from '../constants'
-
-const clientMessageSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('start_game') }),
-  z.object({ type: z.literal('select_truth') }),
-  z.object({ type: z.literal('turn_done'), status: z.union([z.literal('completed'), z.literal('skipped')]) }),
-  z.object({ type: z.literal('end_game') }),
-])
+import { randomInt } from '../lib/random'
+import { EMPTY_ROOM_TIMEOUT, MAX_ROUNDS, TURN_TIMEOUT_MS, DISCONNECT_GRACE_MS } from '../constants'
 
 export interface PlayerSession {
   playerId: string
@@ -34,13 +28,14 @@ interface PlayerChoice {
 }
 
 export class RoomDO extends DurableObject<Bindings> {
+  private dbInstance: DbInstance | null = null
+
   private sessions: Map<WebSocket, PlayerSession> = new Map()
   private playerSockets: Map<string, WebSocket> = new Map()
   private cachedPlayers: { id: string; name: string; isHost: boolean }[] = []
   private playersDirty = true
   private roomId = ''
   private currentChoices: Map<string, PlayerChoice> = new Map()
-  private turnTimeoutId: ReturnType<typeof setTimeout> | null = null
   /** Tracks player IDs that are in the process of reconnecting.
    *  Prevents webSocketClose from cleaning up a player's state
    *  while onPlayerConnected is still setting up the new connection. */
@@ -49,6 +44,12 @@ export class RoomDO extends DurableObject<Bindings> {
    *  onPlayerConnected from calling handleSelectType while
    *  handleTurnDone's delayed callback is about to do so. */
   private turnTransitionInProgress = false
+  /** Players currently in the middle of picking a question. Set synchronously
+   *  (before any await) so duplicate concurrent select_truth messages can't
+   *  both pick a question. */
+  private selectingPlayers = new Set<string>()
+  /** Whether the DO-local question cache has been loaded from D1. */
+  private questionCacheLoaded = false
 
   constructor(ctx: DurableObjectState, env: Bindings) {
     super(ctx, env)
@@ -89,10 +90,17 @@ export class RoomDO extends DurableObject<Bindings> {
           PRIMARY KEY (player_id, question_id)
         )
       `)
+      this.ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS question_cache (
+          id TEXT PRIMARY KEY,
+          type TEXT NOT NULL,
+          text TEXT NOT NULL
+        )
+      `)
 
-      const roomIdRow = this.ctx.storage.sql.exec<{ value: string }>(
-        'SELECT value FROM meta WHERE key = ?', 'room_id'
-      ).toArray()
+      const roomIdRow = this.ctx.storage.sql
+        .exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', 'room_id')
+        .toArray()
       if (roomIdRow.length > 0) {
         this.roomId = roomIdRow[0].value
       }
@@ -101,10 +109,8 @@ export class RoomDO extends DurableObject<Bindings> {
       // Check if we need to re-schedule cleanup or clean up immediately.
       if (this.roomId) {
         await this.handleStaleEmptyRoom()
+        await this.armTurnTimeoutIfMissing()
       }
-
-      // Restore turn timeout if game was in progress when DO was evicted
-      await this.restoreTimersOnInit()
     } catch (error) {
       console.error('Failed to initialize RoomDO storage:', error)
       throw error
@@ -117,9 +123,9 @@ export class RoomDO extends DurableObject<Bindings> {
    * This method re-schedules the alarm or cleans up immediately if the timeout has passed.
    */
   private async handleStaleEmptyRoom(): Promise<void> {
-    const emptySinceRow = this.ctx.storage.sql.exec<{ value: string }>(
-      'SELECT value FROM meta WHERE key = ?', 'room_empty_since'
-    ).toArray()
+    const emptySinceRow = this.ctx.storage.sql
+      .exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', 'room_empty_since')
+      .toArray()
     if (emptySinceRow.length === 0) return // Room not empty, nothing to do
 
     const gameState = await this.getActiveGameState()
@@ -133,16 +139,40 @@ export class RoomDO extends DurableObject<Bindings> {
       await this.cleanupRoomFromD1()
       this.clearAllLocalData()
     } else {
-      // Re-schedule alarm for the remaining time
-      const remaining = EMPTY_ROOM_TIMEOUT - elapsed
-      await this.ctx.storage.setAlarm(Date.now() + Math.min(remaining, EMPTY_ROOM_CHECK_INTERVAL))
+      // Re-arm the alarm for the deadline. DO alarms are durable and survive
+      // evictions/restarts, so the cleanup still happens even if the DO sleeps.
+      await this.scheduleAlarm()
     }
+  }
+
+  /**
+   * Re-arms the durable turn timeout after a DO restart when a game is in
+   * progress but no turn marker survived (e.g. the DO restarted during the 3s
+   * turn transition, when the marker is briefly absent). Without this, a game
+   * could hang forever if the current player never reconnects — no alarm would
+   * ever fire to auto-skip their turn.
+   */
+  private async armTurnTimeoutIfMissing(): Promise<void> {
+    const gameState = await this.getActiveGameState()
+    if (!gameState) return
+
+    const turnRow = this.ctx.storage.sql
+      .exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', 'turn_started_at')
+      .toArray()
+    if (turnRow.length > 0) return
+
+    this.ctx.storage.sql.exec(
+      'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+      'turn_started_at',
+      String(Date.now()),
+    )
+    await this.scheduleAlarm()
   }
 
   private async cleanupRoomFromD1(): Promise<void> {
     if (!this.roomId) return
     try {
-      const db = drizzle(this.env.DB, { schema })
+      const db = this.getDb()
       await db.delete(schema.rooms).where(eq(schema.rooms.id, this.roomId))
     } catch (error) {
       console.error('Failed to delete room from D1 on stale cleanup:', error)
@@ -153,33 +183,12 @@ export class RoomDO extends DurableObject<Bindings> {
     this.ctx.storage.sql.exec('DELETE FROM players')
     this.ctx.storage.sql.exec('DELETE FROM game')
     this.ctx.storage.sql.exec('DELETE FROM used_questions')
+    this.ctx.storage.sql.exec('DELETE FROM question_cache')
     this.ctx.storage.sql.exec('DELETE FROM meta')
     this.cachedPlayers = []
     this.playersDirty = true
+    this.questionCacheLoaded = false
     this.roomId = ''
-  }
-
-  private async restoreTimersOnInit(): Promise<void> {
-    // Check if there's a pending turn timeout that survived DO eviction
-    const row = this.ctx.storage.sql.exec<{ value: string }>(
-      'SELECT value FROM meta WHERE key = ?', 'turn_started_at'
-    ).toArray()
-
-    if (row.length === 0) return
-
-    const turnStartedAt = Number(row[0].value)
-    const elapsed = Date.now() - turnStartedAt
-
-    if (elapsed >= TURN_TIMEOUT_MS) {
-      // Turn has already expired — auto-skip the current player's turn
-      await this.autoSkipTurn()
-    } else {
-      // Schedule the remaining time
-      const remaining = TURN_TIMEOUT_MS - elapsed
-      this.turnTimeoutId = setTimeout(() => {
-        this.autoSkipTurn()
-      }, remaining)
-    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -191,7 +200,8 @@ export class RoomDO extends DurableObject<Bindings> {
     // 2. URL path (/ws/ROOM_ID)
     // 3. X-Room-Id header (set by some DO routing configurations)
     const pathParts = url.pathname.split('/').filter(Boolean)
-    const roomId = url.searchParams.get('roomId') ||
+    const roomId =
+      url.searchParams.get('roomId') ||
       request.headers.get('X-Room-Id') ||
       pathParts[pathParts.length - 1] ||
       ''
@@ -206,42 +216,42 @@ export class RoomDO extends DurableObject<Bindings> {
       this.ctx.storage.sql.exec(
         'INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)',
         'room_id',
-        roomId
+        roomId,
       )
     }
 
-    const db = drizzle(this.env.DB, { schema })
+    const db = this.getDb()
     const registeredPlayers = this.roomId
       ? await db.select().from(schema.players).where(eq(schema.players.roomId, this.roomId)).all()
       : []
 
-    const gameState = await this.getActiveGameState()
+    // ── Identity & authorization ──
+    // A playerId is REQUIRED and must belong to this room; the provided name
+    // must match the registered name. Name-only connections are rejected to
+    // prevent impersonation: player names are visible to everyone in the room,
+    // so accepting a bare name would let anyone take over another player's
+    // identity (including the host). Legitimate reconnects still work via
+    // playerId + the disconnected_player_* markers kept in DO storage.
+    if (!playerId) {
+      return new Response('playerId is required', { status: 403 })
+    }
 
-    if (gameState) {
-      const isInGame = playerId ? gameState.playerOrder.includes(playerId) : false
-      if (!isInGame) {
-        return new Response('Game already in progress', { status: 403 })
-      }
-    } else {
-      // Check authorization in this order:
-      // 1. D1 player records (brand-new players just joined via REST API)
-      // 2. DO local storage (players currently connected or recently connected)
-      // 3. DO meta storage (disconnected players who can still reconnect)
-      const isAuthorizedD1 = playerId
-        ? registeredPlayers.some(p => p.id === playerId)
-        : registeredPlayers.some(p => p.name === trimmedPlayerName)
-      const doPlayers = this.getPlayers()
-      const isAuthorizedDO = playerId
-        ? doPlayers.some(p => p.id === playerId)
-        : doPlayers.some(p => p.name === trimmedPlayerName)
-      const isDisconnected = playerId
-        ? this.ctx.storage.sql.exec<{ value: string }>(
-            'SELECT value FROM meta WHERE key = ?', `disconnected_player_${playerId}`
-          ).toArray().length > 0
-        : false
-      if (!isAuthorizedD1 && !isAuthorizedDO && !isDisconnected) {
-        return new Response('Player not registered in this room', { status: 403 })
-      }
+    const doPlayers = this.getPlayers()
+    const d1Player = registeredPlayers.find((p) => p.id === playerId)
+    const doPlayer = doPlayers.find((p) => p.id === playerId)
+    const disconnected = this.findDisconnectedPlayer(playerId)
+
+    if (!d1Player && !doPlayer && !disconnected) {
+      return new Response('Player not registered in this room', { status: 403 })
+    }
+    const expectedName = d1Player?.name ?? doPlayer?.name ?? disconnected?.name ?? ''
+    if (expectedName !== trimmedPlayerName) {
+      return new Response('Player name does not match', { status: 403 })
+    }
+
+    const gameState = await this.getActiveGameState()
+    if (gameState && !gameState.playerOrder.includes(playerId)) {
+      return new Response('Game already in progress', { status: 403 })
     }
 
     const pair = new WebSocketPair()
@@ -259,9 +269,7 @@ export class RoomDO extends DurableObject<Bindings> {
 
     // Clear the disconnected player marker (if any) since they're connecting now.
     if (playerId) {
-      this.ctx.storage.sql.exec(
-        'DELETE FROM meta WHERE key = ?', `disconnected_player_${playerId}`
-      )
+      this.ctx.storage.sql.exec('DELETE FROM meta WHERE key = ?', `disconnected_player_${playerId}`)
     }
 
     try {
@@ -278,7 +286,7 @@ export class RoomDO extends DurableObject<Bindings> {
   private async syncPlayersFromD1(): Promise<void> {
     if (!this.roomId) return
     try {
-      const db = drizzle(this.env.DB, { schema })
+      const db = this.getDb()
       const roomPlayers = await db
         .select()
         .from(schema.players)
@@ -289,7 +297,7 @@ export class RoomDO extends DurableObject<Bindings> {
           'INSERT OR REPLACE INTO players (id, name, is_host) VALUES (?, ?, ?)',
           p.id,
           p.name,
-          p.isHost ? 1 : 0
+          p.isHost ? 1 : 0,
         )
       }
       this.playersDirty = true
@@ -298,7 +306,11 @@ export class RoomDO extends DurableObject<Bindings> {
     }
   }
 
-  private async onPlayerConnected(server: WebSocket, playerName: string, urlPlayerId: string): Promise<void> {
+  private async onPlayerConnected(
+    server: WebSocket,
+    playerName: string,
+    urlPlayerId: string,
+  ): Promise<void> {
     // Cancel any pending disconnect grace alarm — a player reconnected.
     this.ctx.storage.sql.exec('DELETE FROM meta WHERE key = ?', 'disconnect_grace_started_at')
 
@@ -306,29 +318,27 @@ export class RoomDO extends DurableObject<Bindings> {
     // would also be in DO storage, making it impossible to distinguish reconnects.
     const preSyncDoPlayers = this.getPlayers()
     let isReconnect = urlPlayerId
-      ? preSyncDoPlayers.some(p => p.id === urlPlayerId)
-      : preSyncDoPlayers.some(p => p.name === playerName)
+      ? preSyncDoPlayers.some((p) => p.id === urlPlayerId)
+      : preSyncDoPlayers.some((p) => p.name === playerName)
 
     await this.syncPlayersFromD1()
 
     const att = server.deserializeAttachment() as PlayerSession | null
     const attachmentPlayerId = att?.playerId || ''
-    
+
+    // fetch() already validated the playerId and matched it against the
+    // registered name, so identity is fixed here. We deliberately do NOT
+    // re-resolve identity by name — that would allow impersonating another
+    // player by connecting with their name alone.
     let playerId = urlPlayerId || attachmentPlayerId
-    
     if (!playerId) {
-      const existingPlayers = this.getPlayers()
-      const existing = existingPlayers.find(p => p.name === playerName)
-      if (existing) {
-        playerId = existing.id
-      } else {
-        playerId = crypto.randomUUID()
-      }
+      // Defensive fallback: fetch() normally rejects connections without a playerId.
+      playerId = crypto.randomUUID()
     } else {
-      const existingInDO = this.getPlayers().find(p => p.id === playerId)
+      const existingInDO = this.getPlayers().find((p) => p.id === playerId)
       if (!existingInDO && this.roomId) {
         try {
-          const db = drizzle(this.env.DB, { schema })
+          const db = this.getDb()
           const playerInD1 = await db
             .select()
             .from(schema.players)
@@ -339,7 +349,7 @@ export class RoomDO extends DurableObject<Bindings> {
               'INSERT OR REPLACE INTO players (id, name, is_host) VALUES (?, ?, ?)',
               playerInD1.id,
               playerInD1.name,
-              playerInD1.isHost ? 1 : 0
+              playerInD1.isHost ? 1 : 0,
             )
             this.playersDirty = true
           }
@@ -351,8 +361,8 @@ export class RoomDO extends DurableObject<Bindings> {
 
     const isHost = await this.verifyIsHost(playerName.trim())
 
-    await this.ctx.storage.deleteAlarm()
     this.ctx.storage.sql.exec('DELETE FROM meta WHERE key = ?', 'room_empty_since')
+    await this.scheduleAlarm()
 
     if (att) {
       att.playerId = playerId
@@ -361,10 +371,12 @@ export class RoomDO extends DurableObject<Bindings> {
     }
 
     this.sessions.set(server, { playerId, playerName, isHost })
-    
+
     const oldSocket = this.playerSockets.get(playerId)
     if (oldSocket && oldSocket !== server) {
-      try { oldSocket.close(1000, 'Reconnected elsewhere') } catch { }
+      try {
+        oldSocket.close(1000, 'Reconnected elsewhere')
+      } catch {}
       this.sessions.delete(oldSocket)
     }
     this.playerSockets.set(playerId, server)
@@ -373,7 +385,7 @@ export class RoomDO extends DurableObject<Bindings> {
       'INSERT OR REPLACE INTO players (id, name, is_host) VALUES (?, ?, ?)',
       playerId,
       playerName,
-      isHost ? 1 : 0
+      isHost ? 1 : 0,
     )
     this.playersDirty = true
 
@@ -382,15 +394,27 @@ export class RoomDO extends DurableObject<Bindings> {
     // must re-insert. Use onConflictDoNothing in case the player never disconnected.
     if (this.roomId) {
       try {
-        const d1db = drizzle(this.env.DB, { schema })
-        await d1db.insert(schema.players).values({
-          id: playerId,
-          roomId: this.roomId,
-          name: playerName,
-          isHost,
-        }).onConflictDoNothing()
+        const d1db = this.getDb()
+        await d1db
+          .insert(schema.players)
+          .values({
+            id: playerId,
+            roomId: this.roomId,
+            name: playerName,
+            isHost,
+          })
+          .onConflictDoNothing()
       } catch (error) {
         console.error('Failed to sync player to D1 on connect:', error)
+      }
+      // Bump the room's last-active timestamp so the periodic cron cleanup
+      // never deletes a room that still has players connected.
+      try {
+        await this.env.DB.prepare('UPDATE rooms SET last_active_at = ? WHERE id = ?')
+          .bind(Date.now(), this.roomId)
+          .run()
+      } catch (error) {
+        console.error('Failed to update room activity:', error)
       }
     }
 
@@ -398,23 +422,28 @@ export class RoomDO extends DurableObject<Bindings> {
     this.sendSafe(server, { type: 'room_state', playerId, players } satisfies ServerMessage)
 
     if (!isReconnect) {
-      this.broadcast({
-        type: 'player_joined',
-        playerId,
-        playerName,
-        isHost,
-        players,
-      } satisfies ServerMessage, server)
+      this.broadcast(
+        {
+          type: 'player_joined',
+          playerId,
+          playerName,
+          isHost,
+          players,
+        } satisfies ServerMessage,
+        server,
+      )
+    }
 
-      // Keep all clients in sync: send room_state to every existing player
-      for (const [existingWs, existingSess] of this.sessions) {
-        if (existingWs !== server) {
-          this.sendSafe(existingWs, {
-            type: 'room_state',
-            playerId: existingSess.playerId,
-            players,
-          } satisfies ServerMessage)
-        }
+    // Keep all clients in sync: send room_state to every existing player.
+    // This also runs on reconnects so other players' lists don't show a stale
+    // player count after someone's connection blipped and recovered.
+    for (const [existingWs, existingSess] of this.sessions) {
+      if (existingWs !== server) {
+        this.sendSafe(existingWs, {
+          type: 'room_state',
+          playerId: existingSess.playerId,
+          players,
+        } satisfies ServerMessage)
       }
     }
 
@@ -431,13 +460,13 @@ export class RoomDO extends DurableObject<Bindings> {
       const currentPlayerId = gameState.playerOrder[gameState.currentPlayerIndex]
       if (currentPlayerId === playerId) {
         // Check if player already has a pending choice (reconnect after selecting truth/dare)
-        const stored = this.ctx.storage.sql.exec<{ value: string }>(
-          'SELECT value FROM meta WHERE key = ?', `choice_${playerId}`
-        ).toArray()
+        const stored = this.ctx.storage.sql
+          .exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', `choice_${playerId}`)
+          .toArray()
         if (stored.length > 0) {
           try {
             const choice = JSON.parse(stored[0].value) as PlayerChoice
-            const db = drizzle(this.env.DB, { schema })
+            const db = this.getDb()
             const question = await db
               .select()
               .from(schema.questions)
@@ -490,15 +519,20 @@ export class RoomDO extends DurableObject<Bindings> {
 
   private async getActiveGameState(): Promise<GameState | null> {
     try {
-      const gameRows = this.ctx.storage.sql.exec<{
-        id: string
-        player_order: string
-        current_player_index: number
-        round: number
-      }>('SELECT id, player_order, current_player_index, round FROM game WHERE status = ?', 'playing').toArray()
-      
+      const gameRows = this.ctx.storage.sql
+        .exec<{
+          id: string
+          player_order: string
+          current_player_index: number
+          round: number
+        }>(
+          'SELECT id, player_order, current_player_index, round FROM game WHERE status = ?',
+          'playing',
+        )
+        .toArray()
+
       if (gameRows.length === 0) return null
-      
+
       const gr = gameRows[0]
       return {
         id: gr.id,
@@ -526,21 +560,30 @@ export class RoomDO extends DurableObject<Bindings> {
     }
 
     if (!sess) {
-      this.sendSafe(ws, { type: 'error', message: 'Not connected properly' } satisfies ServerMessage)
+      this.sendSafe(ws, {
+        type: 'error',
+        message: 'Not connected properly',
+      } satisfies ServerMessage)
       return
     }
 
     let parsed: unknown
-    try { 
-      parsed = JSON.parse(message) 
+    try {
+      parsed = JSON.parse(message)
     } catch {
-      this.sendSafe(ws, { type: 'error', message: 'Invalid message format' } satisfies ServerMessage)
-      return 
+      this.sendSafe(ws, {
+        type: 'error',
+        message: 'Invalid message format',
+      } satisfies ServerMessage)
+      return
     }
 
     const result = clientMessageSchema.safeParse(parsed)
     if (!result.success) {
-      this.sendSafe(ws, { type: 'error', message: 'Invalid message format' } satisfies ServerMessage)
+      this.sendSafe(ws, {
+        type: 'error',
+        message: 'Invalid message format',
+      } satisfies ServerMessage)
       return
     }
 
@@ -568,12 +611,20 @@ export class RoomDO extends DurableObject<Bindings> {
 
     if (!att) {
       // DO was evicted and restarted — attachment (player session) is lost.
-      // But DO SQLite storage still has the player/room data.
-      // If no game is active, clean up stale D1 room data so it doesn't
-      // appear in the lobby listing forever.
+      // But DO SQLite storage still has the player/room data, and the D1 room
+      // row is kept so players can reconnect via the room link. If no game is
+      // active, arm the empty-room cleanup instead of deleting the row
+      // immediately (the alarm removes it after EMPTY_ROOM_TIMEOUT, and the
+      // hourly cron backs that up).
       const gameState = await this.getActiveGameState()
       if (!gameState && this.roomId) {
-        await this.cleanupRoomFromD1()
+        const now = Date.now()
+        this.ctx.storage.sql.exec(
+          'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+          'room_empty_since',
+          String(now),
+        )
+        await this.scheduleAlarm()
       }
       return
     }
@@ -596,26 +647,7 @@ export class RoomDO extends DurableObject<Bindings> {
 
     const gameState = await this.getActiveGameState()
     if (!gameState) {
-      // Player disconnected during lobby phase.
-      // Save player info in meta storage so they can reconnect even after
-      // being cleaned up from D1. The meta marker is cleared on next connect.
-      this.ctx.storage.sql.exec(
-        'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
-        `disconnected_player_${sess.playerId}`,
-        JSON.stringify({ name: sess.playerName, isHost: sess.isHost })
-      )
-
-      this.ctx.storage.sql.exec('DELETE FROM players WHERE id = ?', sess.playerId)
-
-      // Hapus dari D1 juga agar lobby listing tidak menampilkan player yang sudah disconnect.
-      if (this.roomId) {
-        try {
-          const d1db = drizzle(this.env.DB, { schema })
-          await d1db.delete(schema.players).where(eq(schema.players.id, sess.playerId))
-        } catch (error) {
-          console.error('Failed to delete player from D1 on disconnect:', error)
-        }
-      }
+      await this.handleLobbyPlayerLeave(sess)
     }
 
     this.playersDirty = true
@@ -641,78 +673,218 @@ export class RoomDO extends DurableObject<Bindings> {
       this.ctx.storage.sql.exec(
         'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
         'disconnect_grace_started_at',
-        String(now)
+        String(now),
       )
-      await this.ctx.storage.setAlarm(now + DISCONNECT_GRACE_MS)
+      await this.scheduleAlarm()
       return
     }
 
     const remainingPlayers = this.getPlayers()
     if (remainingPlayers.length === 0 && !gameState) {
-      // Room is empty with no active game — delete from D1 immediately
-      // so it disappears from the lobby listing instead of showing stale player counts.
-      // DO local storage is preserved for potential reconnection within the timeout.
-      await this.cleanupRoomFromD1()
-
+      // Room is empty with no active game — KEEP the D1 room row so the room
+      // stays joinable from the lobby and the last player can reconnect via
+      // the room link. Deleting it here made the room page 404 for the host
+      // even though the DO still accepted reconnects for ~1h. The DO alarm
+      // removes the row after EMPTY_ROOM_TIMEOUT (and the hourly cron backs
+      // that up), so it never lingers forever.
       const now = Date.now()
       this.ctx.storage.sql.exec(
         'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
         'room_empty_since',
-        String(now)
+        String(now),
       )
-      await this.ctx.storage.setAlarm(now + EMPTY_ROOM_CHECK_INTERVAL)
+      await this.scheduleAlarm()
     } else if (remainingPlayers.length > 0) {
       this.ctx.storage.sql.exec('DELETE FROM meta WHERE key = ?', 'room_empty_since')
     }
+  }
+
+  /**
+   * Lobby-phase cleanup when a player's socket closes — shared by
+   * webSocketClose and webSocketError. Writes the reconnect marker, removes the
+   * player from DO + D1, and transfers the host role if the host left.
+   */
+  private async handleLobbyPlayerLeave(sess: PlayerSession): Promise<void> {
+    // Save player info in meta storage so they can reconnect even after being
+    // cleaned up from D1. The meta marker is cleared on next connect.
+    this.ctx.storage.sql.exec(
+      'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+      `disconnected_player_${sess.playerId}`,
+      JSON.stringify({ name: sess.playerName, isHost: sess.isHost }),
+    )
+
+    this.ctx.storage.sql.exec('DELETE FROM players WHERE id = ?', sess.playerId)
+
+    // Remove from D1 too so the lobby listing doesn't show disconnected players.
+    if (this.roomId) {
+      try {
+        const d1db = this.getDb()
+        await d1db.delete(schema.players).where(eq(schema.players.id, sess.playerId))
+        // If the host left the lobby, transfer the host role to another player
+        // so the room doesn't become permanently un-startable.
+        if (sess.isHost) {
+          await this.promoteNextHost()
+        }
+      } catch (error) {
+        console.error('Failed to delete player from D1 on disconnect:', error)
+      }
+    }
+  }
+
+  /** Promotes the first remaining player to host after the host leaves the lobby. */
+  private async promoteNextHost(): Promise<void> {
+    const remaining = this.getPlayers()
+    const promoted = remaining[0]
+    if (!promoted) return
+
+    this.ctx.storage.sql.exec(
+      'INSERT OR REPLACE INTO players (id, name, is_host) VALUES (?, ?, ?)',
+      promoted.id,
+      promoted.name,
+      1,
+    )
+    this.playersDirty = true
+
+    // Keep the in-memory session in sync so the new host can start the game immediately.
+    const newHostWs = this.playerSockets.get(promoted.id)
+    const newHostSess = newHostWs ? this.sessions.get(newHostWs) : undefined
+    if (newHostSess) newHostSess.isHost = true
+
+    try {
+      const d1db = this.getDb()
+      await d1db
+        .update(schema.players)
+        .set({ isHost: true })
+        .where(eq(schema.players.id, promoted.id))
+      await d1db
+        .update(schema.rooms)
+        .set({ hostName: promoted.name })
+        .where(eq(schema.rooms.id, this.roomId))
+    } catch (error) {
+      console.error('Failed to persist host transfer:', error)
+    }
+    this.ctx.storage.sql.exec(
+      'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+      'room_host',
+      promoted.name,
+    )
   }
 
   async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
     // Clean up session state proactively in case webSocketClose doesn't follow.
     // The Workers runtime typically calls webSocketClose after webSocketError,
     // but this isn't guaranteed by spec — if it doesn't, we'd leak the session.
-    const sess = this.sessions.get(ws)
-    if (sess) {
-      this.playerSockets.delete(sess.playerId)
-      this.sessions.delete(ws)
+    // To prevent D1 leaks, we run the full close logic here.
+    const att = ws.deserializeAttachment()
+    this.sessions.delete(ws)
+
+    if (!att) {
+      // DO was evicted and restarted — attachment (player session) is lost.
+      // Same policy as webSocketClose: keep the D1 room row, arm the
+      // empty-room cleanup instead of deleting immediately.
+      const gameState = await this.getActiveGameState()
+      if (!gameState && this.roomId) {
+        const now = Date.now()
+        this.ctx.storage.sql.exec(
+          'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+          'room_empty_since',
+          String(now),
+        )
+        await this.scheduleAlarm()
+      }
+      console.error('RoomDO WebSocket error:', error)
+      return
     }
+
+    const sess = att as PlayerSession
+
+    // Mirror webSocketClose: never clean up a player who is mid-reconnect, and
+    // never touch the maps if a newer socket already took over. Otherwise this
+    // handler could delete a freshly re-inserted D1 player row or unregister
+    // the new connection's socket (race with onPlayerConnected).
+    if (this.connectingIds.has(sess.playerId)) return
+    const actualSocket = this.playerSockets.get(sess.playerId)
+    if (actualSocket !== ws) return
+    this.playerSockets.delete(sess.playerId)
+
+    const gameState = await this.getActiveGameState()
+    if (!gameState) {
+      await this.handleLobbyPlayerLeave(sess)
+    }
+    this.playersDirty = true
+
+    // If webSocketClose never follows and everyone is gone mid-game, start the
+    // disconnect grace period so the game can end instead of lingering.
+    if (gameState && this.sessions.size === 0) {
+      const now = Date.now()
+      this.ctx.storage.sql.exec(
+        'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+        'disconnect_grace_started_at',
+        String(now),
+      )
+      await this.scheduleAlarm()
+    }
+
     console.error('RoomDO WebSocket error:', error)
   }
 
   async alarm(): Promise<void> {
-    // Check if this is a disconnect grace alarm (all players went offline during game).
-    const graceRow = this.ctx.storage.sql.exec<{ value: string }>(
-      'SELECT value FROM meta WHERE key = ?', 'disconnect_grace_started_at'
-    ).toArray()
+    const now = Date.now()
+
+    // 1) Disconnect grace — all players went offline during a game.
+    const graceRow = this.ctx.storage.sql
+      .exec<{ value: string }>(
+        'SELECT value FROM meta WHERE key = ?',
+        'disconnect_grace_started_at',
+      )
+      .toArray()
     if (graceRow.length > 0) {
       const startedAt = Number(graceRow[0].value)
-      const elapsed = Date.now() - startedAt
-      if (elapsed >= DISCONNECT_GRACE_MS) {
+      if (now >= startedAt + DISCONNECT_GRACE_MS) {
         // Grace period expired — no one reconnected, end the game and clean up.
         const gameState = await this.getActiveGameState()
         if (gameState) {
           await this.endGame(gameState)
           await this.cleanupRoomFromD1()
           this.clearAllLocalData()
+        } else {
+          this.ctx.storage.sql.exec('DELETE FROM meta WHERE key = ?', 'disconnect_grace_started_at')
         }
-      } else {
-        // Grace period hasn't expired yet, re-schedule the remainder.
-        const remaining = DISCONNECT_GRACE_MS - elapsed
-        await this.ctx.storage.setAlarm(Date.now() + Math.min(remaining, EMPTY_ROOM_CHECK_INTERVAL))
       }
+      await this.scheduleAlarm()
       return
     }
 
-    if (await this.getActiveGameState()) return
-    if (this.getPlayers().length > 0) return
+    // 2) Turn timeout — the current player hasn't responded.
+    // The turn timeout is now alarm-based (durable across DO evictions/restarts).
+    const turnRow = this.ctx.storage.sql
+      .exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', 'turn_started_at')
+      .toArray()
+    if (turnRow.length > 0) {
+      const startedAt = Number(turnRow[0].value)
+      if (now >= startedAt + TURN_TIMEOUT_MS) {
+        await this.autoSkipTurn()
+        await this.scheduleAlarm()
+        return
+      }
+    }
 
-    const row = this.ctx.storage.sql.exec<{ value: string }>(
-      'SELECT value FROM meta WHERE key = ?', 'room_empty_since'
-    ).toArray()
-    const emptySince = row.length > 0 ? Number(row[0].value) : Date.now()
-    const elapsed = Date.now() - emptySince
+    // 3) Empty-room cleanup.
+    if (await this.getActiveGameState()) {
+      await this.scheduleAlarm()
+      return
+    }
+    if (this.getPlayers().length > 0) {
+      await this.scheduleAlarm()
+      return
+    }
 
-    if (elapsed < EMPTY_ROOM_TIMEOUT) {
-      await this.ctx.storage.setAlarm(Date.now() + EMPTY_ROOM_CHECK_INTERVAL)
+    const row = this.ctx.storage.sql
+      .exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', 'room_empty_since')
+      .toArray()
+    const emptySince = row.length > 0 ? Number(row[0].value) : now
+    if (now - emptySince < EMPTY_ROOM_TIMEOUT) {
+      await this.scheduleAlarm()
       return
     }
 
@@ -723,19 +895,68 @@ export class RoomDO extends DurableObject<Bindings> {
     this.clearAllLocalData()
   }
 
+  /**
+   * DOs only hold a single alarm slot, so every pending event (turn timeout,
+   * disconnect grace, empty-room cleanup) is merged into one alarm scheduled at
+   * the earliest deadline. Call this after ANY change to the meta markers that
+   * drive those events. If nothing is pending the alarm is cleared.
+   */
+  private async scheduleAlarm(): Promise<void> {
+    const candidates: number[] = []
+    const readMeta = (key: string): number | null => {
+      const rows = this.ctx.storage.sql
+        .exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', key)
+        .toArray()
+      if (rows.length === 0) return null
+      const n = Number(rows[0].value)
+      return Number.isFinite(n) ? n : null
+    }
+
+    const turnStarted = readMeta('turn_started_at')
+    if (turnStarted !== null) candidates.push(turnStarted + TURN_TIMEOUT_MS)
+    const graceStarted = readMeta('disconnect_grace_started_at')
+    if (graceStarted !== null) candidates.push(graceStarted + DISCONNECT_GRACE_MS)
+    const emptySince = readMeta('room_empty_since')
+    if (emptySince !== null) candidates.push(emptySince + EMPTY_ROOM_TIMEOUT)
+
+    if (candidates.length === 0) {
+      await this.ctx.storage.deleteAlarm()
+      return
+    }
+    await this.ctx.storage.setAlarm(Math.max(Date.now(), Math.min(...candidates)))
+  }
+
+  /** Looks up the reconnect marker for a playerId, if any. */
+  private findDisconnectedPlayer(playerId: string): { name: string; isHost: boolean } | null {
+    const rows = this.ctx.storage.sql
+      .exec<{ value: string }>(
+        'SELECT value FROM meta WHERE key = ?',
+        `disconnected_player_${playerId}`,
+      )
+      .toArray()
+    if (rows.length === 0) return null
+    try {
+      const parsed = JSON.parse(rows[0].value) as { name?: string; isHost?: boolean }
+      if (typeof parsed?.name !== 'string') return null
+      return { name: parsed.name, isHost: !!parsed.isHost }
+    } catch {
+      return null
+    }
+  }
+
   private async verifyIsHost(playerName: string): Promise<boolean> {
     const normalized = playerName.trim()
     if (!this.roomId || !normalized) return false
     try {
       // Check cache in DO storage first
-      const cached = this.ctx.storage.sql.exec<{ value: string }>(
-        'SELECT value FROM meta WHERE key = ?', 'room_host'
-      ).toArray()
+      const cached = this.ctx.storage.sql
+        .exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', 'room_host')
+        .toArray()
       if (cached.length > 0) {
         return cached[0].value === normalized
       }
 
-      const db = drizzle(this.env.DB, { schema })
+      const db = this.getDb()
       const room = await db
         .select({ hostName: schema.rooms.hostName })
         .from(schema.rooms)
@@ -749,7 +970,7 @@ export class RoomDO extends DurableObject<Bindings> {
         this.ctx.storage.sql.exec(
           'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
           'room_host',
-          room.hostName
+          room.hostName,
         )
       }
 
@@ -762,7 +983,10 @@ export class RoomDO extends DurableObject<Bindings> {
 
   private async handleStartGame(sess: PlayerSession): Promise<void> {
     if (!sess.isHost) {
-      this.sendSafe(this.playerSockets.get(sess.playerId), { type: 'error', message: 'Only the host can start the game' } satisfies ServerMessage)
+      this.sendSafe(this.playerSockets.get(sess.playerId), {
+        type: 'error',
+        message: 'Only the host can start the game',
+      } satisfies ServerMessage)
       return
     }
 
@@ -771,7 +995,10 @@ export class RoomDO extends DurableObject<Bindings> {
 
     const players = this.getPlayers()
     if (players.length < 2) {
-      this.sendSafe(this.playerSockets.get(sess.playerId), { type: 'error', message: 'Need at least 2 players to start' } satisfies ServerMessage)
+      this.sendSafe(this.playerSockets.get(sess.playerId), {
+        type: 'error',
+        message: 'Need at least 2 players to start',
+      } satisfies ServerMessage)
       return
     }
 
@@ -781,7 +1008,7 @@ export class RoomDO extends DurableObject<Bindings> {
     const gameId = crypto.randomUUID()
 
     try {
-      const db = drizzle(this.env.DB, { schema })
+      const db = this.getDb()
       await db.insert(schema.games).values({
         id: gameId,
         roomId,
@@ -791,10 +1018,7 @@ export class RoomDO extends DurableObject<Bindings> {
         round: 1,
       })
 
-      await db
-        .update(schema.rooms)
-        .set({ status: 'playing' })
-        .where(eq(schema.rooms.id, roomId))
+      await db.update(schema.rooms).set({ status: 'playing' }).where(eq(schema.rooms.id, roomId))
 
       this.ctx.storage.sql.exec(
         'INSERT OR REPLACE INTO game (id, room_id, status, player_order, current_player_index, round) VALUES (?, ?, ?, ?, ?, ?)',
@@ -803,7 +1027,7 @@ export class RoomDO extends DurableObject<Bindings> {
         'playing',
         JSON.stringify(playerOrder),
         0,
-        1
+        1,
       )
 
       this.broadcast({
@@ -815,7 +1039,7 @@ export class RoomDO extends DurableObject<Bindings> {
       } satisfies ServerMessage)
 
       // Truth-only: immediately assign truth question to first player
-      const firstPlayer = players.find(p => p.id === playerOrder[0])
+      const firstPlayer = players.find((p) => p.id === playerOrder[0])
       if (firstPlayer) {
         const firstSess: PlayerSession = {
           playerId: firstPlayer.id,
@@ -826,90 +1050,140 @@ export class RoomDO extends DurableObject<Bindings> {
       }
     } catch (error) {
       console.error('Failed to start game:', error)
-      this.sendSafe(this.playerSockets.get(sess.playerId), { type: 'error', message: 'Failed to start game' } satisfies ServerMessage)
+      this.sendSafe(this.playerSockets.get(sess.playerId), {
+        type: 'error',
+        message: 'Failed to start game',
+      } satisfies ServerMessage)
     }
   }
 
-  private async handleSelectType(sess: PlayerSession, selectedType: 'truth' | 'dare'): Promise<void> {
+  private async handleSelectType(
+    sess: PlayerSession,
+    selectedType: 'truth' | 'dare',
+  ): Promise<void> {
     const gameState = await this.getActiveGameState()
     if (!gameState) return
 
     const currentPlayerId = gameState.playerOrder[gameState.currentPlayerIndex]
     if (sess.playerId !== currentPlayerId) return
 
-    // Prevent duplicate choices
+    // Prevent duplicate choices. The in-flight guard is set synchronously
+    // (before any await) so two rapid select_truth messages can't both pass.
     if (this.currentChoices.has(sess.playerId)) return
+    if (this.selectingPlayers.has(sess.playerId)) return
+    this.selectingPlayers.add(sess.playerId)
 
-    // Player responded — clear the turn choice timeout
-    this.clearTurnTimeout()
+    try {
+      // Player responded — clear the turn choice timeout
+      await this.clearTurnTimeout()
 
-    const db = drizzle(this.env.DB, { schema })
-
-    const pickQuestion = async (type: 'truth' | 'dare') => {
-      try {
-        // Get all available question IDs: query all questions of the type,
-        // then exclude used ones. Uses a local used_questions table (DO SQL)
-        // to avoid re-querying D1 for each turn.
-        const allQuestions = await db
-          .select({ id: schema.questions.id, text: schema.questions.text })
-          .from(schema.questions)
-          .where(eq(schema.questions.type, type))
-          .all()
-
-        const usedIds = this.ctx.storage.sql.exec<{ question_id: string }>(
-          'SELECT question_id FROM used_questions WHERE player_id = ?',
-          sess.playerId
-        ).toArray()
-        const usedSet = new Set(usedIds.map((r) => r.question_id))
-
-        const available = allQuestions.filter((q) => !usedSet.has(q.id))
-        if (available.length === 0) return null
-
-        const idx = crypto.getRandomValues(new Uint32Array(1))[0] % available.length
-        return available[idx]
-      } catch (error) {
-        console.error('Failed to pick question:', error)
-        return null
+      // Truth-only mode: only pick truth questions
+      let picked = await this.pickQuestion('truth', sess.playerId)
+      if (!picked) {
+        // No database questions available — use a fallback question
+        picked = this.getFallbackQuestion('truth')
       }
-    }
+      if (!picked) {
+        // No questions available at all — auto-skip this turn instead of softlocking
+        await this.handleTurnDone(sess, 'skipped')
+        return
+      }
 
-    // Truth-only mode: only pick truth questions
-    let picked = await pickQuestion('truth')
-    if (!picked) {
-      // No database questions available — use a fallback question
-      picked = this.getFallbackQuestion('truth')
+      const choice: PlayerChoice = { type: selectedType, questionId: picked.id }
+      this.currentChoices.set(sess.playerId, choice)
+      this.ctx.storage.sql.exec(
+        'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+        `choice_${sess.playerId}`,
+        JSON.stringify(choice),
+      )
+
+      this.ctx.storage.sql.exec(
+        'INSERT OR REPLACE INTO used_questions (player_id, question_id) VALUES (?, ?)',
+        sess.playerId,
+        picked.id,
+      )
+
+      this.broadcast({
+        type: 'turn_question',
+        playerId: sess.playerId,
+        playerName: sess.playerName,
+        questionType: selectedType,
+        question: picked.text,
+        questionId: picked.id,
+      } satisfies ServerMessage)
+
+      // Start turn timeout: if player doesn't respond within TURN_TIMEOUT_MS, auto-skip.
+      // Uses a durable DO alarm so the timeout survives evictions and restarts.
+      await this.scheduleTurnTimeout()
+    } finally {
+      this.selectingPlayers.delete(sess.playerId)
     }
-    if (!picked) {
-      // No questions available at all — auto-skip this turn instead of softlocking
-      await this.handleTurnDone(sess, 'skipped')
+  }
+
+  /**
+   * Picks a random unused question of the given type for a player.
+   * Question ids/text live in a DO SQLite cache (loaded lazily from D1) so a
+   * turn never pays a D1 round-trip just to choose one question.
+   */
+  private async pickQuestion(
+    type: 'truth' | 'dare',
+    playerId: string,
+  ): Promise<{ id: string; text: string } | null> {
+    try {
+      await this.ensureQuestionCache()
+      const allQuestions = this.ctx.storage.sql
+        .exec<{ id: string; text: string }>(
+          'SELECT id, text FROM question_cache WHERE type = ?',
+          type,
+        )
+        .toArray()
+
+      const usedIds = this.ctx.storage.sql
+        .exec<{ question_id: string }>(
+          'SELECT question_id FROM used_questions WHERE player_id = ?',
+          playerId,
+        )
+        .toArray()
+      const usedSet = new Set(usedIds.map((r) => r.question_id))
+
+      const available = allQuestions.filter((q) => !usedSet.has(q.id))
+      if (available.length === 0) return null
+
+      return available[randomInt(available.length)]
+    } catch (error) {
+      console.error('Failed to pick question:', error)
+      return null
+    }
+  }
+
+  /** Loads all questions from D1 into DO SQLite once (lazy, per DO instance). */
+  private async ensureQuestionCache(): Promise<void> {
+    if (this.questionCacheLoaded) return
+
+    // Already cached from a previous DO lifetime (storage survives eviction).
+    const countRow = this.ctx.storage.sql
+      .exec<{ c: number }>('SELECT COUNT(*) AS c FROM question_cache')
+      .toArray()
+    if (countRow.length > 0 && countRow[0].c > 0) {
+      this.questionCacheLoaded = true
       return
     }
 
-    const choice: PlayerChoice = { type: selectedType, questionId: picked.id }
-    this.currentChoices.set(sess.playerId, choice)
-    this.ctx.storage.sql.exec(
-      'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
-      `choice_${sess.playerId}`,
-      JSON.stringify(choice)
-    )
-
-    this.ctx.storage.sql.exec(
-      'INSERT OR REPLACE INTO used_questions (player_id, question_id) VALUES (?, ?)',
-      sess.playerId,
-      picked.id
-    )
-
-    this.broadcast({
-      type: 'turn_question',
-      playerId: sess.playerId,
-      playerName: sess.playerName,
-      questionType: selectedType,
-      question: picked.text,
-      questionId: picked.id,
-    } satisfies ServerMessage)
-
-    // Start turn timeout: if player doesn't respond within TURN_TIMEOUT_MS, auto-skip
-    this.scheduleTurnTimeout(sess.playerId)
+    const db = this.getDb()
+    const allQuestions = await db
+      .select({ id: schema.questions.id, type: schema.questions.type, text: schema.questions.text })
+      .from(schema.questions)
+      .all()
+    for (const q of allQuestions) {
+      this.ctx.storage.sql.exec(
+        'INSERT OR IGNORE INTO question_cache (id, type, text) VALUES (?, ?, ?)',
+        q.id,
+        q.type,
+        q.text,
+      )
+    }
+    // Mark loaded even if D1 returned zero rows so we don't re-query every turn.
+    this.questionCacheLoaded = true
   }
 
   private static FALLBACK_QUESTIONS: { type: 'truth' | 'dare'; text: string }[] = [
@@ -922,16 +1196,25 @@ export class RoomDO extends DurableObject<Bindings> {
 
   private static fallbackCounter = 0
 
-  private getFallbackQuestion(_type: 'truth' | 'dare'): { id: string; type: 'truth' | 'dare'; text: string; createdAt: Date } | null {
+  private getFallbackQuestion(
+    _type: 'truth' | 'dare',
+  ): { id: string; type: 'truth' | 'dare'; text: string; createdAt: Date } | null {
     const fallbacks = RoomDO.FALLBACK_QUESTIONS
     if (fallbacks.length === 0) return null
-    const idx = crypto.getRandomValues(new Uint32Array(1))[0] % fallbacks.length
-    const picked = fallbacks[idx]
+    const picked = fallbacks[randomInt(fallbacks.length)]
     RoomDO.fallbackCounter++
-    return { id: `fallback_${RoomDO.fallbackCounter}`, type: 'truth', text: picked.text, createdAt: new Date() }
+    return {
+      id: `fallback_${RoomDO.fallbackCounter}`,
+      type: 'truth',
+      text: picked.text,
+      createdAt: new Date(),
+    }
   }
 
-  private async handleTurnDone(sess: PlayerSession, status: 'completed' | 'skipped'): Promise<void> {
+  private async handleTurnDone(
+    sess: PlayerSession,
+    status: 'completed' | 'skipped',
+  ): Promise<void> {
     const gameState = await this.getActiveGameState()
     if (!gameState) return
 
@@ -939,9 +1222,9 @@ export class RoomDO extends DurableObject<Bindings> {
     if (sess.playerId !== currentPlayerId) return
 
     // Clear turn timeout (only timer remaining)
-    this.clearTurnTimeout()
+    await this.clearTurnTimeout()
 
-    const db = drizzle(this.env.DB, { schema })
+    const db = this.getDb()
 
     let nextIdx = gameState.currentPlayerIndex + 1
     let nextRound = gameState.round
@@ -953,9 +1236,9 @@ export class RoomDO extends DurableObject<Bindings> {
     // Retrieve choice before any guard clauses that might return early
     let choice = this.currentChoices.get(sess.playerId)
     if (!choice) {
-      const stored = this.ctx.storage.sql.exec<{ value: string }>(
-        'SELECT value FROM meta WHERE key = ?', `choice_${sess.playerId}`
-      ).toArray()
+      const stored = this.ctx.storage.sql
+        .exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', `choice_${sess.playerId}`)
+        .toArray()
       if (stored.length > 0) {
         try {
           choice = JSON.parse(stored[0].value) as PlayerChoice
@@ -973,7 +1256,9 @@ export class RoomDO extends DurableObject<Bindings> {
       this.currentChoices.delete(sess.playerId)
       this.ctx.storage.sql.exec('DELETE FROM meta WHERE key = ?', `choice_${sess.playerId}`)
 
-      // Broadcast the final turn result so all clients see it before game_ended
+      // Broadcast the final turn result so all clients see it before game_ended.
+      // Use the round that was just COMPLETED (the game is ending, so there is
+      // no "next round" — this keeps the game-over screen from showing round+1).
       const fPlayers = this.getPlayers()
       const fNextPlayer = fPlayers.find((p) => p.id === gameState.playerOrder[nextIdx])
       const fSelectedType = choice?.type ?? 'truth'
@@ -986,7 +1271,7 @@ export class RoomDO extends DurableObject<Bindings> {
         questionType: fSelectedType,
         nextPlayerId: gameState.playerOrder[nextIdx],
         nextPlayerName: fNextPlayer?.name || '',
-        round: nextRound,
+        round: gameState.round,
       } satisfies ServerMessage)
 
       await this.endGame(gameState)
@@ -1021,7 +1306,7 @@ export class RoomDO extends DurableObject<Bindings> {
         'UPDATE game SET current_player_index = ?, round = ? WHERE id = ?',
         nextIdx,
         nextRound,
-        gameState.id
+        gameState.id,
       )
     } catch (error) {
       console.error('Failed to record turn:', error)
@@ -1056,7 +1341,7 @@ export class RoomDO extends DurableObject<Bindings> {
 
       this.turnTransitionInProgress = true
 
-      await new Promise(resolve => setTimeout(resolve, 3000))
+      await new Promise((resolve) => setTimeout(resolve, 3000))
 
       // Check if game state is still valid AND hasn't advanced
       const current = await this.getActiveGameState()
@@ -1064,8 +1349,10 @@ export class RoomDO extends DurableObject<Bindings> {
         this.turnTransitionInProgress = false
         return
       }
-      if (current.currentPlayerIndex !== expectedIdx ||
-          current.playerOrder[current.currentPlayerIndex] !== expectedPlayerId) {
+      if (
+        current.currentPlayerIndex !== expectedIdx ||
+        current.playerOrder[current.currentPlayerIndex] !== expectedPlayerId
+      ) {
         // Game state already advanced — next player already got/handled their question
         this.turnTransitionInProgress = false
         return
@@ -1086,7 +1373,10 @@ export class RoomDO extends DurableObject<Bindings> {
 
   private async handleEndGame(sess: PlayerSession): Promise<void> {
     if (!sess.isHost) {
-      this.sendSafe(this.playerSockets.get(sess.playerId), { type: 'error', message: 'Only the host can end the game' } satisfies ServerMessage)
+      this.sendSafe(this.playerSockets.get(sess.playerId), {
+        type: 'error',
+        message: 'Only the host can end the game',
+      } satisfies ServerMessage)
       return
     }
 
@@ -1098,9 +1388,10 @@ export class RoomDO extends DurableObject<Bindings> {
 
   private async endGame(gameState: GameState): Promise<void> {
     // Clean up turn-related state
-    this.clearTurnTimeout()
+    await this.clearTurnTimeout()
     this.turnTransitionInProgress = false
     this.currentChoices.clear()
+    this.selectingPlayers.clear()
     this.ctx.storage.sql.exec("DELETE FROM meta WHERE key LIKE 'choice_%'")
     this.ctx.storage.sql.exec('DELETE FROM meta WHERE key = ?', 'turn_started_at')
 
@@ -1108,13 +1399,9 @@ export class RoomDO extends DurableObject<Bindings> {
       // DO local state FIRST (synchronous — no yield point) so that
       // getActiveGameState() returns null before any await yields to
       // other handlers (like the setTimeout callback in handleTurnDone).
-      this.ctx.storage.sql.exec(
-        'UPDATE game SET status = ? WHERE id = ?',
-        'finished',
-        gameState.id
-      )
+      this.ctx.storage.sql.exec('UPDATE game SET status = ? WHERE id = ?', 'finished', gameState.id)
 
-      const db = drizzle(this.env.DB, { schema })
+      const db = this.getDb()
       await db
         .update(schema.games)
         .set({ status: 'finished', finishedAt: new Date() })
@@ -1133,18 +1420,15 @@ export class RoomDO extends DurableObject<Bindings> {
     }
   }
 
-  private scheduleTurnTimeout(playerId: string): void {
-    this.clearTurnTimeout()
+  private async scheduleTurnTimeout(): Promise<void> {
+    await this.clearTurnTimeout()
     const now = Date.now()
     this.ctx.storage.sql.exec(
       'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
       'turn_started_at',
-      String(now)
+      String(now),
     )
-    this.turnTimeoutId = setTimeout(() => {
-      this.turnTimeoutId = null
-      this.autoSkipTurn()
-    }, TURN_TIMEOUT_MS)
+    await this.scheduleAlarm()
   }
 
   private async autoSkipTurn(): Promise<void> {
@@ -1153,7 +1437,7 @@ export class RoomDO extends DurableObject<Bindings> {
 
     const currentPlayerId = gameState.playerOrder[gameState.currentPlayerIndex]
     const players = this.getPlayers()
-    const currentPlayer = players.find(p => p.id === currentPlayerId)
+    const currentPlayer = players.find((p) => p.id === currentPlayerId)
     if (!currentPlayer) return
 
     // Clear stored turn timer marker since we're processing it now
@@ -1167,12 +1451,17 @@ export class RoomDO extends DurableObject<Bindings> {
     await this.handleTurnDone(sess, 'skipped')
   }
 
-  private clearTurnTimeout(): void {
-    if (this.turnTimeoutId !== null) {
-      clearTimeout(this.turnTimeoutId)
-      this.turnTimeoutId = null
-    }
+  private async clearTurnTimeout(): Promise<void> {
     this.ctx.storage.sql.exec('DELETE FROM meta WHERE key = ?', 'turn_started_at')
+    await this.scheduleAlarm()
+  }
+
+  /** Returns a cached Drizzle instance bound to the D1 database for this DO. */
+  private getDb(): DbInstance {
+    if (!this.dbInstance) {
+      this.dbInstance = createDb(this.env.DB)
+    }
+    return this.dbInstance
   }
 
   private sendSafe(ws: WebSocket | undefined, msg: ServerMessage): void {
@@ -1194,10 +1483,12 @@ export class RoomDO extends DurableObject<Bindings> {
       return this.cachedPlayers
     }
     try {
-      const rows = this.ctx.storage.sql.exec<{ id: string; name: string; is_host: number }>(
-        'SELECT id, name, is_host FROM players'
-      ).toArray()
-      
+      const rows = this.ctx.storage.sql
+        .exec<{ id: string; name: string; is_host: number }>(
+          'SELECT id, name, is_host FROM players',
+        )
+        .toArray()
+
       // Deduplicate by playerId (keep first occurrence)
       const seen = new Set<string>()
       this.cachedPlayers = rows
@@ -1207,7 +1498,7 @@ export class RoomDO extends DurableObject<Bindings> {
           return true
         })
         .map((r) => ({ id: r.id, name: r.name, isHost: !!r.is_host }))
-      
+
       this.playersDirty = false
       return this.cachedPlayers
     } catch (error) {

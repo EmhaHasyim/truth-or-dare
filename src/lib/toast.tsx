@@ -36,7 +36,10 @@ const typeIcons: Record<ToastType, string> = {
 
 function ToastContainer() {
   return (
-    <div class="fixed z-[9999] flex flex-col gap-2 pointer-events-none max-w-xs w-full px-4" style="bottom: max(1.25rem, env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%);">
+    <div
+      class="fixed z-[9999] flex flex-col gap-2 pointer-events-none max-w-xs w-full px-4"
+      style="bottom: max(1.25rem, env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%);"
+    >
       {toasts().map((toast) => (
         <div
           class={`border rounded-2xl px-4 py-3 pointer-events-auto animate-slide-up-toast flex items-center gap-2.5 shadow-lg ${typeStyles[toast.type]}`}

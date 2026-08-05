@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { hashPassword, verifyPassword, isValidPassword } from './password'
 import { fisherYatesShuffle } from './shuffle'
 
@@ -34,10 +34,44 @@ describe('password hashing', () => {
 
   it('should handle edge cases', async () => {
     // Empty password should throw
-    await expect(hashPassword('')).rejects.toThrow()
-    
+    await expect(hashPassword('')).rejects.toThrow('Invalid password')
+
     // Very long password should throw (PBKDF2 max length is 128)
-    await expect(hashPassword('a'.repeat(150))).rejects.toThrow()
+    await expect(hashPassword('a'.repeat(150))).rejects.toThrow('Password too long')
+  })
+
+  it('should reject invalid verifyPassword input', async () => {
+    expect(await verifyPassword('', 'somehash')).toBe(false)
+    expect(await verifyPassword('password', '')).toBe(false)
+    expect(await verifyPassword('password', 'invalid')).toBe(false)
+  })
+
+  it('should reject malformed stored hash', async () => {
+    expect(await verifyPassword('password', 'invalidsalt:invalidkey')).toBe(false)
+    expect(await verifyPassword('password', 'short:key')).toBe(false)
+    expect(await verifyPassword('password', 'nothex:nothex')).toBe(false)
+  })
+
+  it('should reject wrong password against a real hash', async () => {
+    const hash = await hashPassword('realPassword')
+    expect(await verifyPassword('wrongPassword', hash)).toBe(false)
+  })
+
+  it('verifyPassword should return false on exception', async () => {
+    // Passing null will cause verifyPassword to try to call deriveKey which will fail
+    // but be caught by the try/catch
+    expect(await verifyPassword('', '')).toBe(false)
+  })
+
+  it('verifyPassword should return false when crypto.subtle throws', async () => {
+    const hash = await hashPassword('validPassword123')
+    // Make deriveKey fail inside verifyPassword's try block
+    const importKeySpy = vi
+      .spyOn(crypto.subtle, 'importKey')
+      .mockRejectedValue(new Error('crypto unavailable'))
+    const result = await verifyPassword('validPassword123', hash)
+    expect(result).toBe(false)
+    importKeySpy.mockRestore()
   })
 })
 
@@ -77,7 +111,6 @@ describe('shuffle utility', () => {
 import { serverMessageSchema, clientMessageSchema } from '../types/ws-validation'
 
 describe('WebSocket message schema validation', () => {
-
   it('should validate server room_state message', () => {
     const result = serverMessageSchema.safeParse({
       type: 'room_state',
@@ -119,10 +152,7 @@ describe('WebSocket message schema validation', () => {
   })
 
   it('should validate all server message types', () => {
-    const messages = [
-      { type: 'game_ended' },
-      { type: 'error', message: 'test error' },
-    ]
+    const messages = [{ type: 'game_ended' }, { type: 'error', message: 'test error' }]
     for (const msg of messages) {
       expect(serverMessageSchema.safeParse(msg).success).toBe(true)
     }

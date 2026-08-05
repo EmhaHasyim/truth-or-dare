@@ -12,10 +12,5 @@
   "routerOnly": false,
   "version": 1,
   "framework": "solid",
-  "chosenAddOns": [
-    "cloudflare",
-    "t3env",
-    "tanstack-query",
-    "store"
-  ]
+  "chosenAddOns": ["cloudflare", "t3env", "tanstack-query", "store"]
 }

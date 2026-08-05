@@ -24,9 +24,7 @@ export function SkeletonCard() {
 export function SkeletonCardList(props: { count?: number }) {
   return (
     <div class="space-y-2.5">
-      <For each={Array.from({ length: props.count || 4 })}>
-        {() => <SkeletonCard />}
-      </For>
+      <For each={Array.from({ length: props.count || 4 })}>{() => <SkeletonCard />}</For>
     </div>
   )
 }

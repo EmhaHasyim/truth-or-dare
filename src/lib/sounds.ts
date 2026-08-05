@@ -26,7 +26,7 @@ function playTone(
   duration: number,
   type: OscillatorType = 'sine',
   volume = 0.08,
-  delay = 0
+  delay = 0,
 ) {
   const ctx = getCtx()
   if (!ctx) return
@@ -44,13 +44,13 @@ function playTone(
 
 /** Pleasant chime when receiving a turn */
 export function playTurnChime() {
-  playTone(523.25, 0.2, 'sine', 0.06)   // C5
+  playTone(523.25, 0.2, 'sine', 0.06) // C5
   setTimeout(() => playTone(659.25, 0.3, 'sine', 0.06), 100) // E5
 }
 
 /** Short click/success sound for completing a turn */
 export function playSuccess() {
-  playTone(783.99, 0.15, 'sine', 0.05)  // G5
+  playTone(783.99, 0.15, 'sine', 0.05) // G5
   setTimeout(() => playTone(1046.5, 0.25, 'sine', 0.05), 80) // C6
 }
 

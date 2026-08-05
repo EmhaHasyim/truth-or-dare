@@ -2,8 +2,19 @@ import { createFileRoute, useNavigate, useParams, useSearch } from '@tanstack/so
 import { createSignal, onMount, onCleanup } from 'solid-js'
 import { z } from 'zod'
 import { getStoredUsername } from '../lib/username'
+import { getStoredPlayerSession } from '../lib/player-session'
 import { getWsUrl } from '../lib/ws'
-import { Check, X, SkipForward, Gamepad2, Users, LogOut, Sparkles, Flag, RefreshCw } from 'lucide-solid'
+import {
+  Check,
+  X,
+  SkipForward,
+  Gamepad2,
+  Users,
+  LogOut,
+  Sparkles,
+  Flag,
+  RefreshCw,
+} from 'lucide-solid'
 import { MAX_RECONNECT_ATTEMPTS, WS_RECONNECT_DELAY } from '../constants'
 import { serverMessageSchema } from '../types/ws-validation'
 import type { ServerMessageOutput } from '../types/ws-validation'
@@ -21,26 +32,26 @@ export const Route = createFileRoute('/room/$id/game')({
   validateSearch: searchSchema,
 })
 
-type GamePhase =
-  | 'connecting'
-  | 'show_question'
-  | 'waiting_turn'
-  | 'turn_result'
-  | 'game_ended'
+type GamePhase = 'connecting' | 'show_question' | 'waiting_turn' | 'turn_result' | 'game_ended'
 
 function GamePage() {
   const navigate = useNavigate()
   const routeParams = useParams({ from: '/room/$id/game' })
   const search = useSearch({ from: '/room/$id/game' })
   const roomId = routeParams().id
+  const storedSession = getStoredPlayerSession(roomId)
 
   const [phase, setPhase] = createSignal<GamePhase>('connecting')
   const [players, setPlayers] = createSignal<WsPlayer[]>([])
-  const [myPlayerId, setMyPlayerId] = createSignal(search().playerId || '')
+  const [myPlayerId, setMyPlayerId] = createSignal(
+    search().playerId || storedSession?.playerId || '',
+  )
   const [currentTurnPlayerId, setCurrentTurnPlayerId] = createSignal('')
   const [currentTurnPlayerName, setCurrentTurnPlayerName] = createSignal('')
   const [question, setQuestion] = createSignal('')
-  const [lastResult, setLastResult] = createSignal<{ playerName: string; status: string } | null>(null)
+  const [lastResult, setLastResult] = createSignal<{ playerName: string; status: string } | null>(
+    null,
+  )
   const [round, setRound] = createSignal(1)
   const [isHost, setIsHost] = createSignal(false)
   const [ws, setWs] = createSignal<WebSocket | null>(null)
@@ -53,20 +64,38 @@ function GamePage() {
 
   onMount(() => {
     const username = getStoredUsername()
-    if (!username) { navigate({ to: '/' }); return }
+    if (!username) {
+      navigate({ to: '/' })
+      return
+    }
     connectWs()
   })
 
   onCleanup(() => {
-    if (turnResultTimer) { clearTimeout(turnResultTimer); turnResultTimer = null }
+    if (turnResultTimer) {
+      clearTimeout(turnResultTimer)
+      turnResultTimer = null
+    }
     cleanupWs()
   })
 
   function cleanupWs() {
-    if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null }
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
-    if (turnResultTimer) { clearTimeout(turnResultTimer); turnResultTimer = null }
-    if (wsCleanup) { wsCleanup(); wsCleanup = null }
+    if (connectTimeout) {
+      clearTimeout(connectTimeout)
+      connectTimeout = null
+    }
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+    if (turnResultTimer) {
+      clearTimeout(turnResultTimer)
+      turnResultTimer = null
+    }
+    if (wsCleanup) {
+      wsCleanup()
+      wsCleanup = null
+    }
     ws()?.close()
     setWs(null)
   }
@@ -74,10 +103,14 @@ function GamePage() {
   function connectWs() {
     cleanupWs()
     setWsError('')
-    const pid = search().playerId
-    const username = getStoredUsername() || ''
+    const pid = search().playerId || storedSession?.playerId || ''
+    // Prefer the registered name so the server's name-match check passes even
+    // if the user changed their stored username after joining.
+    const username = storedSession?.playerName || getStoredUsername() || ''
     const socket = new WebSocket(
-      getWsUrl(`/ws/${roomId}?name=${encodeURIComponent(username)}${pid ? `&playerId=${encodeURIComponent(pid)}` : ''}`)
+      getWsUrl(
+        `/ws/${roomId}?name=${encodeURIComponent(username)}${pid ? `&playerId=${encodeURIComponent(pid)}` : ''}`,
+      ),
     )
 
     connectTimeout = setTimeout(() => {
@@ -85,7 +118,10 @@ function GamePage() {
     }, 8000)
 
     socket.onopen = () => {
-      if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null }
+      if (connectTimeout) {
+        clearTimeout(connectTimeout)
+        connectTimeout = null
+      }
       reconnectCount = 0
       setWsError('')
     }
@@ -95,11 +131,16 @@ function GamePage() {
         const parsed = JSON.parse(event.data)
         const result = serverMessageSchema.safeParse(parsed)
         if (result.success) handleMessage(result.data)
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
 
     socket.onclose = () => {
-      if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null }
+      if (connectTimeout) {
+        clearTimeout(connectTimeout)
+        connectTimeout = null
+      }
       if (phase() !== 'game_ended' && !reconnectTimer && reconnectCount < MAX_RECONNECT_ATTEMPTS) {
         setPhase('connecting')
         reconnectCount++
@@ -125,7 +166,9 @@ function GamePage() {
   function sendEndGame() {
     const socket = ws()
     if (!socket || socket.readyState !== WebSocket.OPEN) return
-    try { socket.send(JSON.stringify({ type: 'end_game' })) } catch {}
+    try {
+      socket.send(JSON.stringify({ type: 'end_game' }))
+    } catch {}
   }
 
   const [showLeaveModal, setShowLeaveModal] = createSignal(false)
@@ -137,11 +180,11 @@ function GamePage() {
         setMyPlayerId(msg.playerId)
         setPlayers(msg.players)
         // Detect if I'm the host
-        const me = msg.players.find(p => p.id === msg.playerId)
+        const me = msg.players.find((p) => p.id === msg.playerId)
         if (me) setIsHost(me.isHost)
         if (phase() === 'connecting') setPhase('waiting_turn')
         if (currentTurnPlayerId() && !currentTurnPlayerName()) {
-          const cp = msg.players.find(p => p.id === currentTurnPlayerId())
+          const cp = msg.players.find((p) => p.id === currentTurnPlayerId())
           if (cp) setCurrentTurnPlayerName(cp.name)
         }
         break
@@ -155,8 +198,10 @@ function GamePage() {
         const firstPlayerId = msg.playerOrder[msg.currentPlayerIndex]
         setCurrentTurnPlayerId(firstPlayerId)
         // Try from existing players first; fall back to 'Pemain X' if unknown
-        const known = players().find(p => p.id === firstPlayerId)
-        setCurrentTurnPlayerName(known?.name || (firstPlayerId === myPlayerId() ? getStoredUsername() || '' : ''))
+        const known = players().find((p) => p.id === firstPlayerId)
+        setCurrentTurnPlayerName(
+          known?.name || (firstPlayerId === myPlayerId() ? getStoredUsername() || '' : ''),
+        )
         break
       case 'turn_question':
         setCurrentTurnPlayerId(msg.playerId)
@@ -181,7 +226,10 @@ function GamePage() {
         setPhase('turn_result')
         if (msg.status === 'completed') playSuccess()
         else playSkip()
-        if (turnResultTimer) { clearTimeout(turnResultTimer); turnResultTimer = null }
+        if (turnResultTimer) {
+          clearTimeout(turnResultTimer)
+          turnResultTimer = null
+        }
         turnResultTimer = setTimeout(() => {
           turnResultTimer = null
           setPhase('waiting_turn')
@@ -198,11 +246,19 @@ function GamePage() {
   function send(msg: { type: 'turn_done'; status: 'completed' | 'skipped' }) {
     const socket = ws()
     if (!socket || socket.readyState !== WebSocket.OPEN) return
-    try { socket.send(JSON.stringify(msg)) } catch {}
+    try {
+      socket.send(JSON.stringify(msg))
+    } catch {}
   }
 
-  function completeTurn() { vibrate(15); send({ type: 'turn_done', status: 'completed' }) }
-  function skipTurn() { vibrate(10); send({ type: 'turn_done', status: 'skipped' }) }
+  function completeTurn() {
+    vibrate(15)
+    send({ type: 'turn_done', status: 'completed' })
+  }
+  function skipTurn() {
+    vibrate(10)
+    send({ type: 'turn_done', status: 'skipped' })
+  }
 
   const isMyTurn = () => currentTurnPlayerId() === myPlayerId()
 
@@ -210,12 +266,20 @@ function GamePage() {
     <div class="min-h-dvh flex flex-col bg-gradient-to-b from-base-200 to-base-300 pb-[env(safe-area-inset-bottom,0px)]">
       {/* Thin header */}
       <div class="flex items-center justify-between px-4 h-12 shrink-0">
-        <button class="btn btn-ghost btn-sm min-h-[36px] rounded-xl text-base-content/50" onClick={() => setShowLeaveModal(true)}>
+        <button
+          class="btn btn-ghost btn-sm min-h-[36px] rounded-xl text-base-content/50"
+          aria-label="Tinggalkan game"
+          onClick={() => setShowLeaveModal(true)}
+        >
           <LogOut size={15} />
         </button>
         <div class="flex items-center gap-2">
           {isHost() && phase() !== 'game_ended' && (
-            <button class="btn btn-ghost btn-sm min-h-[36px] rounded-xl text-error/70" onClick={() => setShowEndModal(true)}>
+            <button
+              class="btn btn-ghost btn-sm min-h-[36px] rounded-xl text-error/70"
+              aria-label="Akhiri game"
+              onClick={() => setShowEndModal(true)}
+            >
               <Flag size={14} />
             </button>
           )}
@@ -232,7 +296,7 @@ function GamePage() {
 
       {/* Player avatars row */}
       <div class="flex justify-center gap-2 px-4 mb-3">
-        {players().map(p => {
+        {players().map((p) => {
           const isCurrent = p.id === currentTurnPlayerId()
           const isMe = p.id === myPlayerId()
           return (
@@ -248,7 +312,8 @@ function GamePage() {
                 {p.name[0].toUpperCase()}
               </div>
               <span class="text-[10px] font-medium truncate max-w-[48px] text-base-content/50">
-                {p.name}{isMe ? '' : ''}
+                {p.name}
+                {isMe ? '' : ''}
               </span>
             </div>
           )
@@ -270,10 +335,16 @@ function GamePage() {
                     <h2 class="font-bold text-base mb-1">Koneksi Error</h2>
                     <p class="text-sm text-base-content/50 mb-5">{wsError()}</p>
                     <div class="flex flex-col gap-2">
-                      <button class="btn btn-primary min-h-[44px] w-full rounded-xl shadow-md" onClick={() => window.location.reload()}>
+                      <button
+                        class="btn btn-primary min-h-[44px] w-full rounded-xl shadow-md"
+                        onClick={() => window.location.reload()}
+                      >
                         <RefreshCw size={16} /> Refresh Halaman
                       </button>
-                      <button class="btn btn-ghost min-h-[44px] w-full rounded-xl" onClick={() => navigate({ to: '/' })}>
+                      <button
+                        class="btn btn-ghost min-h-[44px] w-full rounded-xl"
+                        onClick={() => navigate({ to: '/' })}
+                      >
                         Kembali
                       </button>
                     </div>
@@ -316,7 +387,9 @@ function GamePage() {
               ) : (
                 <div class="flex flex-col items-center gap-3 mt-6">
                   <span class="loading loading-dots loading-md text-primary" />
-                  <p class="text-sm text-base-content/50">Menunggu {currentTurnPlayerName()} menjawab...</p>
+                  <p class="text-sm text-base-content/50">
+                    Menunggu {currentTurnPlayerName()} menjawab...
+                  </p>
                 </div>
               )}
             </div>
@@ -340,20 +413,28 @@ function GamePage() {
           {phase() === 'turn_result' && lastResult() && (
             <div class="w-full max-w-sm phase-slide-up">
               <div class="bg-base-100 rounded-3xl shadow-lg border border-base-200 p-6 text-center">
-                <div class={`w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-3 ${lastResult()?.status === 'completed' ? 'bg-success/10' : 'bg-base-200'}`}>
-                  {lastResult()?.status === 'completed'
-                    ? <Check size={28} class="text-success" />
-                    : <SkipForward size={28} class="text-base-content/40" />
-                  }
+                <div
+                  class={`w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-3 ${lastResult()?.status === 'completed' ? 'bg-success/10' : 'bg-base-200'}`}
+                >
+                  {lastResult()?.status === 'completed' ? (
+                    <Check size={28} class="text-success" />
+                  ) : (
+                    <SkipForward size={28} class="text-base-content/40" />
+                  )}
                 </div>
                 <p class="font-bold text-base">{lastResult()?.playerName}</p>
                 <p class="text-sm text-base-content/50 mt-1">
                   {lastResult()?.status === 'completed' ? 'menjawab pertanyaan!' : 'melewati'}
                 </p>
                 <div class="w-full bg-base-200 rounded-full h-1.5 mt-5 overflow-hidden">
-                  <div class="h-full bg-primary rounded-full progress-countdown" style="animation-duration: 2.8s" />
+                  <div
+                    class="h-full bg-primary rounded-full progress-countdown"
+                    style="animation-duration: 2.8s"
+                  />
                 </div>
-                <p class="text-xs text-base-content/40 mt-3">{currentTurnPlayerName()} selanjutnya...</p>
+                <p class="text-xs text-base-content/40 mt-3">
+                  {currentTurnPlayerName()} selanjutnya...
+                </p>
               </div>
             </div>
           )}
@@ -380,10 +461,16 @@ function GamePage() {
                 </div>
 
                 <div class="flex flex-col gap-2">
-                  <button class="btn btn-primary w-full min-h-[48px] text-sm font-bold shadow-md rounded-xl" onClick={() => navigate({ to: '/create-room' })}>
+                  <button
+                    class="btn btn-primary w-full min-h-[48px] text-sm font-bold shadow-md rounded-xl"
+                    onClick={() => navigate({ to: '/create-room' })}
+                  >
                     <Gamepad2 size={18} /> Main Lagi
                   </button>
-                  <button class="btn btn-ghost w-full min-h-[44px] text-sm rounded-xl" onClick={() => navigate({ to: '/' })}>
+                  <button
+                    class="btn btn-ghost w-full min-h-[44px] text-sm rounded-xl"
+                    onClick={() => navigate({ to: '/' })}
+                  >
                     Kembali
                   </button>
                 </div>
@@ -399,10 +486,19 @@ function GamePage() {
           <h3 class="text-lg font-bold mb-1">Akhiri Game?</h3>
           <p class="text-sm text-base-content/50 mb-6">Game akan berakhir untuk semua pemain.</p>
           <div class="flex flex-col gap-2">
-            <button class="btn btn-error w-full min-h-[48px] rounded-xl shadow-md" onClick={() => { setShowEndModal(false); sendEndGame() }}>
+            <button
+              class="btn btn-error w-full min-h-[48px] rounded-xl shadow-md"
+              onClick={() => {
+                setShowEndModal(false)
+                sendEndGame()
+              }}
+            >
               <Flag size={16} /> Akhiri Game
             </button>
-            <button class="btn btn-ghost w-full min-h-[48px] rounded-xl" onClick={() => setShowEndModal(false)}>
+            <button
+              class="btn btn-ghost w-full min-h-[48px] rounded-xl"
+              onClick={() => setShowEndModal(false)}
+            >
               Batal
             </button>
           </div>
@@ -418,10 +514,19 @@ function GamePage() {
           <h3 class="text-lg font-bold mb-1">Tinggalkan Game?</h3>
           <p class="text-sm text-base-content/50 mb-6">Kamu bisa balik lewat halaman room.</p>
           <div class="flex flex-col gap-2">
-            <button class="btn btn-primary w-full min-h-[48px] rounded-xl shadow-md" onClick={() => { setShowLeaveModal(false); navigate({ to: '/' }) }}>
+            <button
+              class="btn btn-primary w-full min-h-[48px] rounded-xl shadow-md"
+              onClick={() => {
+                setShowLeaveModal(false)
+                navigate({ to: '/' })
+              }}
+            >
               Ya, Keluar
             </button>
-            <button class="btn btn-ghost w-full min-h-[48px] rounded-xl" onClick={() => setShowLeaveModal(false)}>
+            <button
+              class="btn btn-ghost w-full min-h-[48px] rounded-xl"
+              onClick={() => setShowLeaveModal(false)}
+            >
               Batal
             </button>
           </div>

@@ -16,7 +16,12 @@ const createRoomSchema = z.object({
 })
 
 const joinRoomSchema = z.object({
-  playerName: z.string().trim().min(1).max(20).regex(NAME_REGEX, 'Karakter spesial tidak diizinkan'),
+  playerName: z
+    .string()
+    .trim()
+    .min(1)
+    .max(20)
+    .regex(NAME_REGEX, 'Karakter spesial tidak diizinkan'),
   password: z.string().max(72).optional(),
 })
 
@@ -38,6 +43,9 @@ const routes = api
     const active = await rooms.listActiveRooms(db)
     return c.json(active)
   })
+  // Explicit /rooms/code (no code segment) so it returns 404 instead of being
+  // swallowed by /rooms/:id and rejected with a 400 uuid validation error.
+  .get('/rooms/code', rateLimit, (c) => c.json({ error: 'Room not found' } as const, 404))
   .get('/rooms/:id', rateLimit, zValidator('param', z.object({ id: uuidParam })), async (c) => {
     const db = createDb(c.env.DB)
     const { id } = c.req.valid('param')
@@ -45,21 +53,32 @@ const routes = api
     if (!room) return c.json({ error: 'Room not found' } as const, 404)
     return c.json(room)
   })
-  .get('/rooms/code/:code', rateLimit, zValidator('param', z.object({ code: roomCodeParam })), async (c) => {
-    const db = createDb(c.env.DB)
-    const { code } = c.req.valid('param')
-    const room = await rooms.getRoomByCode(db, code)
-    if (!room) return c.json({ error: 'Room not found' } as const, 404)
-    return c.json(room)
-  })
-  .post('/rooms/:id/join', rateLimit, zValidator('param', z.object({ id: uuidParam })), zValidator('json', joinRoomSchema), async (c) => {
-    const db = createDb(c.env.DB)
-    const { id } = c.req.valid('param')
-    const body = c.req.valid('json')
-    const result = await rooms.joinRoom(db, { roomId: id, ...body })
-    if ('error' in result) return c.json({ error: result.error } as const, 400)
-    return c.json(result.room)
-  })
+  .get(
+    '/rooms/code/:code',
+    rateLimit,
+    zValidator('param', z.object({ code: roomCodeParam })),
+    async (c) => {
+      const db = createDb(c.env.DB)
+      const { code } = c.req.valid('param')
+      const room = await rooms.getRoomByCode(db, code)
+      if (!room) return c.json({ error: 'Room not found' } as const, 404)
+      return c.json(room)
+    },
+  )
+  .post(
+    '/rooms/:id/join',
+    rateLimit,
+    zValidator('param', z.object({ id: uuidParam })),
+    zValidator('json', joinRoomSchema),
+    async (c) => {
+      const db = createDb(c.env.DB)
+      const { id } = c.req.valid('param')
+      const body = c.req.valid('json')
+      const result = await rooms.joinRoom(db, { roomId: id, ...body })
+      if ('error' in result) return c.json({ error: result.error } as const, 400)
+      return c.json(result.room)
+    },
+  )
   .get('/health', (c) => c.json({ status: 'ok', timestamp: Date.now() } as const))
 
 export type AppType = typeof routes

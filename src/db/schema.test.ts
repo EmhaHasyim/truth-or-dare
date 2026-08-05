@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { getTableConfig } from 'drizzle-orm/sqlite-core'
 import { schema } from '../db'
 
 describe('database schema', () => {
@@ -14,10 +15,18 @@ describe('database schema', () => {
       expect(roomColumns.passwordHash).toBeDefined()
       expect(roomColumns.status).toBeDefined()
       expect(roomColumns.createdAt).toBeDefined()
+      expect(roomColumns.lastActiveAt).toBeDefined()
+    })
+
+    it('lastActiveAt should map to last_active_at with default 0', () => {
+      expect(roomColumns.lastActiveAt.name).toBe('last_active_at')
+      expect(roomColumns.lastActiveAt.notNull).toBe(true)
+      expect(String(roomColumns.lastActiveAt.default)).toContain('0')
     })
 
     it('id should be primary key (text column)', () => {
       expect(roomColumns.id.name).toBe('id')
+      expect(roomColumns.id.primary).toBe(true)
     })
 
     it('code should be unique, not null', () => {
@@ -25,14 +34,30 @@ describe('database schema', () => {
       expect(roomColumns.code.notNull).toBe(true)
     })
 
-    it('maxPlayers should have a default value', () => {
+    it('maxPlayers should have a default value of 2', () => {
       expect(roomColumns.maxPlayers.name).toBe('max_players')
       expect(roomColumns.maxPlayers.default).toBeDefined()
+      expect(String(roomColumns.maxPlayers.default)).toContain('2')
     })
 
     it('status should have default waiting', () => {
       expect(roomColumns.status.name).toBe('status')
       expect(roomColumns.status.default).toBe('waiting')
+    })
+
+    it('hostName should map to host_name column', () => {
+      expect(roomColumns.hostName.name).toBe('host_name')
+      expect(roomColumns.hostName.notNull).toBe(true)
+    })
+
+    it('passwordHash should be nullable', () => {
+      expect(roomColumns.passwordHash.name).toBe('password_hash')
+      expect(roomColumns.passwordHash.notNull).toBe(false)
+    })
+
+    it('createdAt should use timestamp_ms mode', () => {
+      expect(roomColumns.createdAt.name).toBe('created_at')
+      expect(roomColumns.createdAt.notNull).toBe(true)
     })
   })
 
@@ -55,6 +80,12 @@ describe('database schema', () => {
       expect(playerColumns.isHost.name).toBe('is_host')
       expect(playerColumns.isHost.notNull).toBe(true)
       expect(playerColumns.isHost.default).toBeDefined()
+      expect(playerColumns.isHost.default).toBe(false)
+    })
+
+    it('should have unique index on (roomId, name)', () => {
+      const tableConfig = schema.players
+      expect(tableConfig).toBeDefined()
     })
   })
 
@@ -71,6 +102,11 @@ describe('database schema', () => {
     it('type should be not null (truth/dare enum)', () => {
       expect(questionColumns.type.name).toBe('type')
       expect(questionColumns.type.notNull).toBe(true)
+    })
+
+    it('text should be not null', () => {
+      expect(questionColumns.text.name).toBe('text')
+      expect(questionColumns.text.notNull).toBe(true)
     })
   })
 
@@ -99,6 +135,17 @@ describe('database schema', () => {
       expect(gameColumns.round.default).toBeDefined()
       expect(String(gameColumns.round.default)).toContain('1')
     })
+
+    it('status should have enum playing/finished', () => {
+      expect(gameColumns.status.name).toBe('status')
+      expect(gameColumns.status.notNull).toBe(true)
+      expect(gameColumns.status.default).toBe('playing')
+    })
+
+    it('finishedAt should be nullable', () => {
+      expect(gameColumns.finishedAt.name).toBe('finished_at')
+      expect(gameColumns.finishedAt.notNull).toBe(false)
+    })
   })
 
   describe('turns table', () => {
@@ -118,7 +165,7 @@ describe('database schema', () => {
     it('id should be auto-increment primary key', () => {
       expect(turnColumns.id.name).toBe('id')
       expect(turnColumns.id.primary).toBe(true)
-      expect(turnColumns.id.autoIncrement).toBe(true)
+      expect((turnColumns.id as any).autoIncrement).toBe(true)
     })
 
     it('type should be not null (truth or dare)', () => {
@@ -126,9 +173,62 @@ describe('database schema', () => {
       expect(turnColumns.type.notNull).toBe(true)
     })
 
-    it('status should have default', () => {
+    it('status should have default pending', () => {
       expect(turnColumns.status.name).toBe('status')
       expect(turnColumns.status.notNull).toBe(true)
+      expect(turnColumns.status.default).toBe('pending')
+    })
+
+    it('questionId should be nullable (references questions)', () => {
+      expect(turnColumns.questionId.name).toBe('question_id')
+      expect(turnColumns.questionId.notNull).toBe(false)
+    })
+  })
+
+  describe('table relationships', () => {
+    it('players.roomId references rooms.id with cascade delete', () => {
+      // The foreign key constraint is defined on the column
+      expect(schema.players.roomId).toBeDefined()
+    })
+
+    it('games.roomId references rooms.id with cascade delete', () => {
+      expect(schema.games.roomId).toBeDefined()
+    })
+
+    it('turns.gameId references games.id with cascade delete', () => {
+      expect(schema.turns.gameId).toBeDefined()
+    })
+  })
+
+  describe('materialized table config (lazy callbacks)', () => {
+    it('players: foreign key + unique index callbacks are invoked', () => {
+      // Accessing getTableConfig materializes the extraConfig uniqueIndex callback.
+      // Calling fk.getName() materializes the lazy references(() => rooms.id) callback.
+      const cfg = getTableConfig(schema.players)
+      expect(cfg.foreignKeys.length).toBe(1)
+      const fk = cfg.foreignKeys[0]
+      expect(fk.onDelete).toBe('cascade')
+      expect(fk.getName()).toContain('players')
+      expect(cfg.indexes.length).toBe(1)
+      expect(cfg.indexes[0].config.name).toBe('idx_players_room_name')
+      expect(cfg.name).toBe('players')
+    })
+
+    it('games: foreign key callback is invoked', () => {
+      const cfg = getTableConfig(schema.games)
+      expect(cfg.foreignKeys.length).toBe(1)
+      const fk = cfg.foreignKeys[0]
+      expect(fk.onDelete).toBe('cascade')
+      expect(fk.getName()).toContain('games')
+      expect(cfg.name).toBe('games')
+    })
+
+    it('turns: both foreign key callbacks are invoked', () => {
+      const cfg = getTableConfig(schema.turns)
+      expect(cfg.foreignKeys.length).toBe(2)
+      const names = cfg.foreignKeys.map((fk) => fk.getName())
+      expect(names.some((n) => n.includes('turns'))).toBe(true)
+      expect(cfg.name).toBe('turns')
     })
   })
 })

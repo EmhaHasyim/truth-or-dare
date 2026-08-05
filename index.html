@@ -2,7 +2,10 @@
 <html lang="id">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no, interactive-widget=resizes-content" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <meta name="theme-color" content="#fae9d8" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#1d232a" media="(prefers-color-scheme: dark)" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -16,6 +19,14 @@
     <link rel="apple-touch-icon" href="/logo192.png" />
     <link rel="icon" href="/favicon.ico" />
     <title>Truth or Dare</title>
+    <script>
+      // Restore the saved theme before first paint to avoid a flash of the
+      // wrong theme. Mirrors the write in src/routes/__root.tsx (ThemeToggle).
+      try {
+        var savedTheme = localStorage.getItem('theme')
+        if (savedTheme) document.documentElement.setAttribute('data-theme', savedTheme)
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="app"></div>

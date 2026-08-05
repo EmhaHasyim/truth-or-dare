@@ -1,6 +1,7 @@
 import { createFileRoute, useNavigate } from '@tanstack/solid-router'
 import { createSignal, onMount, onCleanup, Show } from 'solid-js'
-import { getStoredUsername } from '../lib/username'
+import { getStoredUsername, setStoredUsername } from '../lib/username'
+import { storePlayerSession } from '../lib/player-session'
 import { apiClient } from '../api/client'
 import { Search, Lock, Plus, RefreshCw, Hash } from 'lucide-solid'
 import { showToast } from '../lib/toast'
@@ -27,8 +28,9 @@ function JoinRoom() {
     try {
       const res = await apiClient.rooms.$get()
       if (res.ok) setRooms(await res.json())
-    } catch { /* ignore */ }
-    finally {
+    } catch {
+      /* ignore */
+    } finally {
       if (!silent) setFetching(false)
       else if (pollCounter === pollId) setPolling(false)
     }
@@ -49,7 +51,10 @@ function JoinRoom() {
 
   async function joinRoom(roomId: string, roomPassword: string | undefined) {
     setError('')
-    if (!name().trim()) { setError('Masukkan nama kamu'); return }
+    if (!name().trim()) {
+      setError('Masukkan nama kamu')
+      return
+    }
     setLoading(true)
 
     try {
@@ -59,13 +64,20 @@ function JoinRoom() {
       })
 
       if (!joinRes.ok) {
-        const errBody = await joinRes.json() as Record<string, unknown>
+        const errBody = (await joinRes.json()) as Record<string, unknown>
         setError(typeof errBody.error === 'string' ? errBody.error : 'Gagal gabung')
         setLoading(false)
         return
       }
 
-      const joinedRoom = await joinRes.json() as Room
+      const joinedRoom = (await joinRes.json()) as Room
+      const usedName = name().trim()
+      // Keep the stored username in sync so the room page can find this
+      // player by name after navigation.
+      setStoredUsername(usedName)
+      // Remember this browser's player identity for this room (see create-room.tsx).
+      const myId = joinedRoom.players.find((p) => p.name === usedName)?.id
+      if (myId) storePlayerSession(joinedRoom.id, { playerId: myId, playerName: usedName })
       showToast(`Gabung ke ${joinedRoom.name}!`, 'success')
       navigate({ to: `/room/${joinedRoom.id}` })
     } catch {
@@ -88,16 +100,26 @@ function JoinRoom() {
   async function handleJoinByCode(e: Event) {
     e.preventDefault()
     setError('')
-    if (!name().trim()) { setError('Masukkan nama kamu'); return }
-    if (!code().trim()) { setError('Masukkan kode room'); return }
+    if (!name().trim()) {
+      setError('Masukkan nama kamu')
+      return
+    }
+    if (!code().trim()) {
+      setError('Masukkan kode room')
+      return
+    }
 
     setLoading(true)
     try {
       const res = await apiClient.rooms.code[':code'].$get({
         param: { code: code().trim().toUpperCase() },
       })
-      if (!res.ok) { setError('Room tidak ditemukan'); setLoading(false); return }
-      const room = await res.json() as Room
+      if (!res.ok) {
+        setError('Room tidak ditemukan')
+        setLoading(false)
+        return
+      }
+      const room = (await res.json()) as Room
 
       // Jika room butuh password, tampilkan modal dulu
       if (room.hasPassword) {
@@ -133,7 +155,10 @@ function JoinRoom() {
   }
 
   return (
-    <div class="flex-1 flex flex-col px-4 pt-4" style="padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px));">
+    <div
+      class="flex-1 flex flex-col px-4 pt-4"
+      style="padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px));"
+    >
       <div class="max-w-sm mx-auto w-full flex-1 flex flex-col">
         <div class="text-center mb-6">
           <div class="w-12 h-12 rounded-2xl bg-secondary/10 flex items-center justify-center mx-auto mb-3">
@@ -147,7 +172,12 @@ function JoinRoom() {
         <div class="bg-base-100 rounded-2xl shadow-sm border border-base-200 p-5 mb-5">
           <form onSubmit={handleJoinByCode} class="space-y-3">
             <div>
-              <label class="text-xs font-semibold text-base-content/60 mb-1.5 block" for="join-name">Nama Kamu</label>
+              <label
+                class="text-xs font-semibold text-base-content/60 mb-1.5 block"
+                for="join-name"
+              >
+                Nama Kamu
+              </label>
               <input
                 id="join-name"
                 type="text"
@@ -159,7 +189,12 @@ function JoinRoom() {
               />
             </div>
             <div>
-              <label class="text-xs font-semibold text-base-content/60 mb-1.5 block" for="join-code">Kode Room</label>
+              <label
+                class="text-xs font-semibold text-base-content/60 mb-1.5 block"
+                for="join-code"
+              >
+                Kode Room
+              </label>
               <input
                 id="join-code"
                 type="text"
@@ -174,8 +209,19 @@ function JoinRoom() {
               />
             </div>
             {error() && <p class="text-error text-xs">{error()}</p>}
-            <button type="submit" class="btn btn-secondary w-full min-h-[48px] text-sm font-bold shadow-md rounded-xl" disabled={loading()}>
-              <Show when={loading()} fallback={<><Hash size={16} /> Gabung Pakai Kode</>}>
+            <button
+              type="submit"
+              class="btn btn-secondary w-full min-h-[48px] text-sm font-bold shadow-md rounded-xl"
+              disabled={loading()}
+            >
+              <Show
+                when={loading()}
+                fallback={
+                  <>
+                    <Hash size={16} /> Gabung Pakai Kode
+                  </>
+                }
+              >
                 <span class="loading loading-spinner loading-md" />
               </Show>
             </button>
@@ -196,7 +242,10 @@ function JoinRoom() {
           </div>
           <button
             class="btn btn-ghost btn-xs min-h-[32px] rounded-xl gap-1.5"
-            onClick={() => { setPolling(true); fetchRooms(true) }}
+            onClick={() => {
+              setPolling(true)
+              fetchRooms(true)
+            }}
           >
             <RefreshCw size={13} classList={{ 'animate-spin': polling() }} />
             <span class="text-xs">Refresh</span>
@@ -214,7 +263,10 @@ function JoinRoom() {
             </div>
             <p class="text-sm font-medium text-base-content/50">Belum ada room aktif</p>
             <p class="text-xs text-base-content/40 mb-5">Buat room dan undang teman!</p>
-            <button class="btn btn-primary min-h-[44px] shadow-md rounded-xl text-sm" onClick={() => navigate({ to: '/create-room' })}>
+            <button
+              class="btn btn-primary min-h-[44px] shadow-md rounded-xl text-sm"
+              onClick={() => navigate({ to: '/create-room' })}
+            >
               <Plus size={16} /> Buat Room
             </button>
           </div>
@@ -230,7 +282,14 @@ function JoinRoom() {
                     <h3 class="font-semibold text-sm truncate">{room.name}</h3>
                     <p class="text-xs text-base-content/50 mt-0.5">
                       {room.hostName} · {room.players.length}/{room.maxPlayers}
-                      {room.hasPassword ? <span> · <Lock size={11} class="inline" /></span> : ''}
+                      {room.hasPassword ? (
+                        <span>
+                          {' '}
+                          · <Lock size={11} class="inline" />
+                        </span>
+                      ) : (
+                        ''
+                      )}
                     </p>
                   </div>
                   <button
@@ -238,7 +297,13 @@ function JoinRoom() {
                     disabled={loading() || isFull}
                     onClick={() => requestJoinRoom(room)}
                   >
-                    {isFull ? 'Penuh' : loading() ? <span class="loading loading-spinner loading-sm" /> : 'Gabung'}
+                    {isFull ? (
+                      'Penuh'
+                    ) : loading() ? (
+                      <span class="loading loading-spinner loading-sm" />
+                    ) : (
+                      'Gabung'
+                    )}
                   </button>
                 </div>
               )
@@ -262,13 +327,36 @@ function JoinRoom() {
               autofocus
             />
             <div class="modal-action flex flex-col gap-2 mt-6">
-              <button type="submit" class="btn btn-primary w-full min-h-[48px] rounded-xl shadow-md">Gabung</button>
-              <button type="button" class="btn btn-ghost w-full min-h-[48px] rounded-xl" onClick={() => { setShowPasswordModal(false); setPasswordTargetRoom(null); setPasswordInput('') }}>Batal</button>
+              <button
+                type="submit"
+                class="btn btn-primary w-full min-h-[48px] rounded-xl shadow-md"
+              >
+                Gabung
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost w-full min-h-[48px] rounded-xl"
+                onClick={() => {
+                  setShowPasswordModal(false)
+                  setPasswordTargetRoom(null)
+                  setPasswordInput('')
+                }}
+              >
+                Batal
+              </button>
             </div>
           </form>
         </div>
         <form method="dialog" class="modal-backdrop">
-          <button onClick={() => { setShowPasswordModal(false); setPasswordTargetRoom(null); setPasswordInput('') }}>close</button>
+          <button
+            onClick={() => {
+              setShowPasswordModal(false)
+              setPasswordTargetRoom(null)
+              setPasswordInput('')
+            }}
+          >
+            close
+          </button>
         </form>
       </dialog>
     </div>

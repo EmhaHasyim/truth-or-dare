@@ -6,7 +6,7 @@ export type DbEnv = {
 }
 
 export function createDb(db: D1Database) {
-  return drizzle(db, { schema })
+  return drizzle(db)
 }
 
 export type DbInstance = ReturnType<typeof createDb>

@@ -98,4 +98,117 @@ describe('sound effects', () => {
     // This test just verifies the function doesn't throw.
     expect(() => sounds.playTurnChime()).not.toThrow()
   })
+
+  it('should handle failed AudioContext() constructor gracefully', async () => {
+    // Override AudioContext to throw
+    const origAudioCtx = (window as any).AudioContext
+    ;(window as any).AudioContext = vi.fn(() => {
+      throw new Error('no audio')
+    })
+    const mod = await import('./sounds')
+    expect(() => mod.playTurnChime()).not.toThrow()
+    expect(() => mod.playSuccess()).not.toThrow()
+    expect(() => mod.playSkip()).not.toThrow()
+    expect(() => mod.playError()).not.toThrow()
+    expect(() => mod.playFanfare()).not.toThrow()
+    ;(window as any).AudioContext = origAudioCtx
+  })
+
+  it('should handle resumed AudioContext state', async () => {
+    // Note: getCtx() caches audioCtx, so this test verifies the resume
+    // path by checking the already-initialized context from beforeAll.
+    // The mock context was initialized with state 'running', so resume
+    // is not called again. This is behavior verification.
+    expect(() => sounds.playTurnChime()).not.toThrow()
+  })
+
+  it('should not throw when AudioContext constructor fails and we call multiple times', async () => {
+    const origAudioCtx = (window as any).AudioContext
+    ;(window as any).AudioContext = vi.fn(() => {
+      throw new Error('no audio')
+    })
+    const mod = await import('./sounds')
+    expect(() => {
+      mod.playTurnChime()
+      mod.playSuccess()
+      mod.playSkip()
+    }).not.toThrow()
+    ;(window as any).AudioContext = origAudioCtx
+  })
+
+  it('should resume a suspended AudioContext', async () => {
+    mockCtx.state = 'suspended'
+    sounds.playTurnChime()
+    expect(mockCtx.resume).toHaveBeenCalled()
+    mockCtx.state = 'running'
+  })
+
+  it('should swallow resume rejection', async () => {
+    mockCtx.state = 'suspended'
+    mockCtx.resume.mockImplementation(() => Promise.reject(new Error('resume failed')))
+    // .catch(() => {}) inside getCtx swallows the rejection synchronously
+    expect(() => sounds.playTurnChime()).not.toThrow()
+    await Promise.resolve()
+    mockCtx.resume.mockResolvedValue(undefined)
+    mockCtx.state = 'running'
+  })
+
+  it('should handle window undefined (no-op)', async () => {
+    vi.resetModules()
+    const originalWindow = window as any
+    // Simulate SSR environment where window doesn't exist
+    ;(globalThis as any).window = undefined
+    const mod = await import('./sounds')
+    expect(() => {
+      mod.playTurnChime()
+      mod.playSuccess()
+      mod.playSkip()
+      mod.playError()
+      mod.playFanfare()
+    }).not.toThrow()
+    ;(globalThis as any).window = originalWindow
+    // Re-import to restore the initialized audioCtx for the shared `sounds` reference
+    vi.resetModules()
+    ;(window as any).AudioContext = vi.fn(function () {
+      return mockCtx
+    })
+    await import('./sounds')
+  })
+
+  it('should hit the catch branch when AudioContext constructor throws in a fresh module', async () => {
+    vi.resetModules()
+    ;(window as any).AudioContext = vi.fn(function () {
+      throw new Error('no audio')
+    })
+    const mod = await import('./sounds')
+    expect(() => mod.playTurnChime()).not.toThrow()
+    // Restore shared state for the `sounds` reference used by other tests
+    vi.resetModules()
+    ;(window as any).AudioContext = vi.fn(function () {
+      return mockCtx
+    })
+    await import('./sounds')
+  })
+
+  it('should fall back to webkitAudioContext when AudioContext is unavailable', async () => {
+    vi.resetModules()
+    const originalAudioCtx = (window as any).AudioContext
+    const originalWebkitCtx = (window as any).webkitAudioContext
+    ;(window as any).AudioContext = undefined
+    const webkitCtx = makeMockAudioCtx()
+    ;(window as any).webkitAudioContext = vi.fn(function () {
+      return webkitCtx
+    })
+    const mod = await import('./sounds')
+    expect(() => mod.playTurnChime()).not.toThrow()
+    expect(webkitCtx.createOscillator).toHaveBeenCalled()
+    // Restore shared state for other tests
+    vi.resetModules()
+    ;(window as any).AudioContext = originalAudioCtx
+    ;(window as any).webkitAudioContext = originalWebkitCtx
+    ;(window as any).AudioContext = vi.fn(function () {
+      return mockCtx
+    })
+    await import('./sounds')
+  })
 })

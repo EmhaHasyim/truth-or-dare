@@ -9,15 +9,15 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as JoinRoomRouteImport } from './routes/join-room'
-import { Route as CreateRoomRouteImport } from './routes/create-room'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as CreateRoomRouteImport } from './routes/create-room'
+import { Route as JoinRoomRouteImport } from './routes/join-room'
 import { Route as RoomIdRouteImport } from './routes/room.$id'
 import { Route as RoomIdGameRouteImport } from './routes/room.$id.game'
 
-const JoinRoomRoute = JoinRoomRouteImport.update({
-  id: '/join-room',
-  path: '/join-room',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const CreateRoomRoute = CreateRoomRouteImport.update({
@@ -25,9 +25,9 @@ const CreateRoomRoute = CreateRoomRouteImport.update({
   path: '/create-room',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const JoinRoomRoute = JoinRoomRouteImport.update({
+  id: '/join-room',
+  path: '/join-room',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RoomIdRoute = RoomIdRouteImport.update({
@@ -66,11 +66,7 @@ export interface FileRoutesById {
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    | '/'
-    | '/create-room'
-    | '/join-room'
-    | '/room/$id'
-    | '/room/$id/game'
+    '/' | '/create-room' | '/join-room' | '/room/$id' | '/room/$id/game'
   fileRoutesByTo: FileRoutesByTo
   to: '/' | '/create-room' | '/join-room' | '/room/$id' | '/room/$id/game'
   id:
@@ -91,11 +87,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/solid-router' {
   interface FileRoutesByPath {
-    '/join-room': {
-      id: '/join-room'
-      path: '/join-room'
-      fullPath: '/join-room'
-      preLoaderRoute: typeof JoinRoomRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/create-room': {
@@ -105,11 +101,11 @@ declare module '@tanstack/solid-router' {
       preLoaderRoute: typeof CreateRoomRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/join-room': {
+      id: '/join-room'
+      path: '/join-room'
+      fullPath: '/join-room'
+      preLoaderRoute: typeof JoinRoomRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/room/$id': {
@@ -149,5 +145,3 @@ const rootRouteChildren: RootRouteChildren = {
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
-
-import type { getRouter } from './router.tsx'

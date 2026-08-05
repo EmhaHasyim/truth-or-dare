@@ -20,7 +20,7 @@ function Home() {
     const val = nameTrimmed()
     if (!val) return { valid: false, reason: '' }
     if (val.length > 20) return { valid: false, reason: 'Maksimal 20 karakter' }
-    if (/[<>{}\]\]/.test(val)) return { valid: false, reason: 'Karakter spesial tidak diizinkan' }
+    if (/[<>{}\\]/.test(val)) return { valid: false, reason: 'Karakter spesial tidak diizinkan' }
     return { valid: true, reason: '' }
   })
 
@@ -42,7 +42,10 @@ function Home() {
   const showActions = () => !!username()
 
   return (
-    <div class="flex-1 flex flex-col px-4 pt-4" style="padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px));">
+    <div
+      class="flex-1 flex flex-col px-4 pt-4"
+      style="padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px));"
+    >
       <div class="flex-1 flex flex-col max-w-sm mx-auto w-full">
         {/* Hero */}
         <div class="text-center mb-8">
@@ -51,9 +54,7 @@ function Home() {
               <Sparkles size={32} class="text-primary" />
             </div>
           </div>
-          <h1 class="text-3xl font-black tracking-tight gradient-text mb-1">
-            Truth or Dare
-          </h1>
+          <h1 class="text-3xl font-black tracking-tight gradient-text mb-1">Truth or Dare</h1>
           <p class="text-sm text-base-content/50">
             {showActions() ? 'Mau main lagi?' : 'Game seru — sekarang online!'}
           </p>
@@ -73,7 +74,10 @@ function Home() {
                         'input-error': touched() && !nameValid().valid && nameTrimmed().length > 0,
                       }}
                       value={nameInput()}
-                      onInput={(e) => { setNameInput(e.currentTarget.value); setTouched(true) }}
+                      onInput={(e) => {
+                        setNameInput(e.currentTarget.value)
+                        setTouched(true)
+                      }}
                       onBlur={() => setTouched(true)}
                       maxLength={20}
                       autofocus
@@ -87,7 +91,14 @@ function Home() {
                     class="btn btn-primary w-full min-h-[52px] text-base font-bold shadow-md rounded-2xl"
                     disabled={!nameValid().valid || saving()}
                   >
-                    <Show when={saving()} fallback={<><Gamepad2 size={20} /> Mulai Main!</>}>
+                    <Show
+                      when={saving()}
+                      fallback={
+                        <>
+                          <Gamepad2 size={20} /> Mulai Main!
+                        </>
+                      }
+                    >
                       <span class="loading loading-spinner loading-md" />
                     </Show>
                   </button>
@@ -134,7 +145,11 @@ function Home() {
 
                 <button
                   class="btn btn-ghost w-full text-sm text-base-content/40 mt-2 min-h-[44px] rounded-xl"
-                  onClick={() => { setNameInput(''); setShowNameForm(true); setTouched(false) }}
+                  onClick={() => {
+                    setNameInput('')
+                    setShowNameForm(true)
+                    setTouched(false)
+                  }}
                 >
                   Bukan {username()}?
                 </button>

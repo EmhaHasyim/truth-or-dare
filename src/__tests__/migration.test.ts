@@ -3,7 +3,10 @@ import fs from 'fs'
 import path from 'path'
 
 describe('migration SQL', () => {
-  const migrationPath = path.resolve(__dirname, '../../migrations/0000_consolidated/migration.sql')
+  const migrationPath = path.resolve(
+    __dirname,
+    '../../migrations/20260803165152_misty_talos/migration.sql',
+  )
   const sql = fs.readFileSync(migrationPath, 'utf-8')
 
   it('should exist and be non-empty', () => {
@@ -49,7 +52,7 @@ describe('migration SQL', () => {
     expect(sql).toContain('CREATE TABLE `turns`')
     expect(sql).toContain('`id` integer PRIMARY KEY AUTOINCREMENT')
     expect(sql).toContain('`type` text NOT NULL')
-    expect(sql).toContain('`status` text DEFAULT \'pending\' NOT NULL')
+    expect(sql).toContain("`status` text DEFAULT 'pending' NOT NULL")
   })
 
   it('should have statement breakpoints between CREATE TABLE statements', () => {
@@ -95,7 +98,7 @@ describe('seed data', () => {
 
   it('should have non-empty question texts', () => {
     const lines = sql.split('\n')
-    const valueLines = lines.filter(l => l.trim().startsWith("('t"))
+    const valueLines = lines.filter((l) => l.trim().startsWith("('t"))
     for (const line of valueLines) {
       const matches = line.match(/'truth',\s*'([^']+)'/)
       if (matches) {
@@ -106,8 +109,8 @@ describe('seed data', () => {
 
   it('should have reasonable question text length (min 5 chars)', () => {
     const lines = sql.split('\n')
-    const valueLines = lines.filter(l => l.trim().startsWith("('t"))
-    const shortQuestions = valueLines.filter(l => {
+    const valueLines = lines.filter((l) => l.trim().startsWith("('t"))
+    const shortQuestions = valueLines.filter((l) => {
       const match = l.match(/'truth',\s*'([^']+)'/)
       return match && match[1].length < 5
     })
@@ -116,18 +119,23 @@ describe('seed data', () => {
 
   it('should not have duplicate question texts', () => {
     const lines = sql.split('\n')
-    const valueLines = lines.filter(l => l.trim().startsWith("('t"))
-    const texts = valueLines.map(l => {
-      const match = l.match(/'truth',\s*'([^']+)'/)
-      return match ? match[1] : ''
-    }).filter(Boolean)
+    const valueLines = lines.filter((l) => l.trim().startsWith("('t"))
+    const texts = valueLines
+      .map((l) => {
+        const match = l.match(/'truth',\s*'([^']+)'/)
+        return match ? match[1] : ''
+      })
+      .filter(Boolean)
     const uniqueTexts = new Set(texts)
     expect(uniqueTexts.size).toBe(texts.length)
   })
 })
 
 describe('schema consistency with migration', () => {
-  const migrationPath = path.resolve(__dirname, '../../migrations/0000_consolidated/migration.sql')
+  const migrationPath = path.resolve(
+    __dirname,
+    '../../migrations/20260803165152_misty_talos/migration.sql',
+  )
   const migrationSql = fs.readFileSync(migrationPath, 'utf-8')
 
   it('should have matching table names between schema and migration', () => {
@@ -143,5 +151,28 @@ describe('schema consistency with migration', () => {
     expect(migrationSql).toContain('`game_id`')
     expect(migrationSql).toContain('`question_id`')
     expect(migrationSql).toContain('FOREIGN KEY')
+  })
+})
+
+describe('rooms.created_at default migration', () => {
+  const migrationsDir = path.resolve(__dirname, '../../migrations')
+  const folders = fs
+    .readdirSync(migrationsDir, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name)
+
+  const roomsRebuildSql = folders
+    .map((f) => fs.readFileSync(path.join(migrationsDir, f, 'migration.sql'), 'utf-8'))
+    .find((sql) => sql.includes('`__new_rooms`'))
+
+  it('should have a migration that rebuilds rooms with created_at DEFAULT', () => {
+    expect(roomsRebuildSql).toBeDefined()
+    expect(roomsRebuildSql).toContain('`created_at` integer DEFAULT (unixepoch() * 1000) NOT NULL')
+  })
+
+  it('should migrate existing data before swapping tables', () => {
+    expect(roomsRebuildSql).toContain('INSERT INTO `__new_rooms`')
+    expect(roomsRebuildSql).toContain('DROP TABLE `rooms`')
+    expect(roomsRebuildSql).toContain('ALTER TABLE `__new_rooms` RENAME TO `rooms`')
   })
 })

@@ -19,7 +19,7 @@ describe('fireConfetti', () => {
 
   it('should call confetti twice immediately (left + right burst)', async () => {
     const confettiModule = await import('canvas-confetti')
-    const confetti = confettiModule.default as ReturnType<typeof vi.fn>
+    const confetti = confettiModule.default as unknown as ReturnType<typeof vi.fn>
     confetti.mockClear()
 
     const { fireConfetti } = await import('./confetti')
@@ -30,7 +30,7 @@ describe('fireConfetti', () => {
 
   it('should fire a third burst after 300ms delay', async () => {
     const confettiModule = await import('canvas-confetti')
-    const confetti = confettiModule.default as ReturnType<typeof vi.fn>
+    const confetti = confettiModule.default as unknown as ReturnType<typeof vi.fn>
     confetti.mockClear()
 
     const { fireConfetti } = await import('./confetti')

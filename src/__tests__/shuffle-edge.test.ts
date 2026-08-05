@@ -21,9 +21,9 @@ describe('shuffle edge cases', () => {
     const shuffled = fisherYatesShuffle(arr)
     expect(shuffled).toHaveLength(5)
     // Types should be preserved
-    expect(shuffled.filter(x => typeof x === 'number')).toHaveLength(1)
-    expect(shuffled.filter(x => typeof x === 'string')).toHaveLength(1)
-    expect(shuffled.filter(x => typeof x === 'boolean')).toHaveLength(1)
+    expect(shuffled.filter((x) => typeof x === 'number')).toHaveLength(1)
+    expect(shuffled.filter((x) => typeof x === 'string')).toHaveLength(1)
+    expect(shuffled.filter((x) => typeof x === 'boolean')).toHaveLength(1)
   })
 
   it('should handle arrays with objects (reference check)', () => {

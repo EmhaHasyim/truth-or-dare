@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "arrowParens": "always",
+  "bracketSameLine": false,
+  "bracketSpacing": true,
+  "endOfLine": "crlf",
+  "jsxSingleQuote": false,
+  "printWidth": 100,
+  "quoteProps": "as-needed",
+  "semi": false,
+  "singleQuote": true,
+  "tabWidth": 2,
+  "insertFinalNewline": true,
+  "ignorePatterns": [
+    "dist/**",
+    ".wrangler/**",
+    "node_modules/**",
+    "migrations/**",
+    "worker-configuration.d.ts",
+    "routeTree.gen.ts",
+    "index.html"
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "vitest", "jsx_a11y", "import"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "env": {
+    "browser": true,
+    "node": true,
+    "worker": true
+  },
+  "rules": {
+    "import/no-cycle": "off",
+    "import/no-named-as-default": "off",
+    "import/no-named-as-default-member": "off",
+    "import/no-unassigned-import": "off",
+    "eslint/no-await-in-loop": "off",
+    "no-console": "off",
+    "vitest/require-mock-type-parameters": "off",
+    "eslint/no-unassigned-vars": "off",
+    "jsx-a11y/label-has-associated-control": "off",
+    "jsx-a11y/control-has-associated-label": "off"
+  },
+  "overrides": [
+    {
+      "files": ["*.test.ts", "*.test.tsx", "**/__tests__/**"],
+      "env": {
+        "vitest": true
+      },
+      "rules": {
+        "eslint/no-shadow": "off",
+        "eslint/no-new": "off",
+        "vitest/expect-expect": "off",
+        "vitest/no-conditional-expect": "off"
+      }
+    }
+  ],
+  "ignorePatterns": ["dist/**", ".wrangler/**", "node_modules/**", "migrations/**"]
+}

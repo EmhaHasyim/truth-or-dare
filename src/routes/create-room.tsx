@@ -1,6 +1,7 @@
 import { createFileRoute, useNavigate } from '@tanstack/solid-router'
 import { createSignal, onMount, Show } from 'solid-js'
-import { getStoredUsername } from '../lib/username'
+import { getStoredUsername, setStoredUsername } from '../lib/username'
+import { storePlayerSession } from '../lib/player-session'
 import { isValidPassword } from '../lib/password'
 import { apiClient, type CreateRoomResponse } from '../api/client'
 import { Plus, Sparkles, Shield, Lock } from 'lucide-solid'
@@ -24,8 +25,14 @@ function CreateRoom() {
   async function handleCreate(e: Event) {
     e.preventDefault()
     setError('')
-    if (!name().trim()) { setError('Masukkan nama kamu'); return }
-    if (!roomName().trim()) { setError('Masukkan nama room'); return }
+    if (!name().trim()) {
+      setError('Masukkan nama kamu')
+      return
+    }
+    if (!roomName().trim()) {
+      setError('Masukkan nama room')
+      return
+    }
 
     setLoading(true)
     try {
@@ -38,13 +45,21 @@ function CreateRoom() {
       })
 
       if (!res.ok) {
-        const errBody = await res.json() as Record<string, unknown>
+        const errBody = (await res.json()) as Record<string, unknown>
         setError(typeof errBody.error === 'string' ? errBody.error : 'Gagal buat room')
         setLoading(false)
         return
       }
 
-      const room = await res.json() as CreateRoomResponse
+      const room = (await res.json()) as CreateRoomResponse
+      const usedName = name().trim()
+      // Keep the stored username in sync so the room page can find this
+      // player by name after navigation.
+      setStoredUsername(usedName)
+      // Remember this browser's player identity for this room so the WebSocket
+      // can reconnect even after the player row is cleaned up from D1.
+      const hostId = room.players.find((p) => p.isHost)?.id
+      if (hostId) storePlayerSession(room.id, { playerId: hostId, playerName: usedName })
       setShowOverlay(true)
       setTimeout(() => navigate({ to: `/room/${room.id}` }), 600)
     } catch {
@@ -54,7 +69,10 @@ function CreateRoom() {
   }
 
   return (
-    <div class="flex-1 flex flex-col px-4 pt-4" style="padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px));">
+    <div
+      class="flex-1 flex flex-col px-4 pt-4"
+      style="padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px));"
+    >
       <Show when={showOverlay()}>
         <div class="fixed inset-0 z-50 bg-base-200/80 backdrop-blur-sm flex items-center justify-center phase-fade-in">
           <div class="text-center">
@@ -76,7 +94,12 @@ function CreateRoom() {
         <div class="bg-base-100 rounded-2xl shadow-sm border border-base-200 p-5">
           <form onSubmit={handleCreate} class="space-y-4">
             <div>
-              <label class="text-xs font-semibold text-base-content/60 mb-1.5 block" for="create-name">Nama Kamu</label>
+              <label
+                class="text-xs font-semibold text-base-content/60 mb-1.5 block"
+                for="create-name"
+              >
+                Nama Kamu
+              </label>
               <input
                 id="create-name"
                 type="text"
@@ -89,7 +112,12 @@ function CreateRoom() {
             </div>
 
             <div>
-              <label class="text-xs font-semibold text-base-content/60 mb-1.5 block" for="create-room-name">Nama Room</label>
+              <label
+                class="text-xs font-semibold text-base-content/60 mb-1.5 block"
+                for="create-room-name"
+              >
+                Nama Room
+              </label>
               <input
                 id="create-room-name"
                 type="text"
@@ -102,8 +130,12 @@ function CreateRoom() {
             </div>
 
             <div>
-              <label class="text-xs font-semibold text-base-content/60 mb-1.5 flex items-center gap-1.5" for="create-password">
-                <Lock size={12} /> Password <span class="font-normal text-base-content/40">(opsional)</span>
+              <label
+                class="text-xs font-semibold text-base-content/60 mb-1.5 flex items-center gap-1.5"
+                for="create-password"
+              >
+                <Lock size={12} /> Password{' '}
+                <span class="font-normal text-base-content/40">(opsional)</span>
               </label>
               <input
                 id="create-password"
@@ -128,7 +160,11 @@ function CreateRoom() {
               </div>
             )}
 
-            <button type="submit" class="btn btn-primary w-full min-h-[50px] text-base font-bold shadow-md rounded-xl mt-2" disabled={loading()}>
+            <button
+              type="submit"
+              class="btn btn-primary w-full min-h-[50px] text-base font-bold shadow-md rounded-xl mt-2"
+              disabled={loading()}
+            >
               <Show when={loading()} fallback={<>Buat Room</>}>
                 <span class="loading loading-spinner loading-md" />
               </Show>

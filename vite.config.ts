@@ -8,12 +8,9 @@ import solidPlugin from 'vite-plugin-solid'
 const isTest = process.env.VITEST === 'true'
 
 export default defineConfig({
-  plugins: [
-    !isTest && devtools(),
-    tailwindcss(),
-    !isTest && cloudflare(),
-    solidPlugin(),
-  ].filter(Boolean),
+  plugins: [!isTest && devtools(), tailwindcss(), !isTest && cloudflare(), solidPlugin()].filter(
+    Boolean,
+  ),
   server: {
     port: 3000,
   },

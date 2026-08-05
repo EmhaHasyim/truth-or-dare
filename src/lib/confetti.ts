@@ -10,7 +10,6 @@ export function fireConfetti() {
     particleCount: 80,
     startVelocity: 35,
     origin: { y: 0.6 },
-    disableForReducedMotion: true,
   }
 
   confetti({ ...defaults, angle: 60, origin: { x: 0, y: 0.6 } })

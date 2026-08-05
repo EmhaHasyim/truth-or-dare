@@ -1,11 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import {
-  createRoom,
-  getRoomById,
-  getRoomByCode,
-  listActiveRooms,
-  joinRoom,
-} from './rooms'
+import { createRoom, getRoomById, getRoomByCode, listActiveRooms, joinRoom } from './rooms'
 import { MAX_PLAYERS } from '../constants'
 import type { DbInstance } from '../db'
 
@@ -31,7 +25,12 @@ vi.mock('../db', () => ({
   createDb: vi.fn(() => createMockDb()),
   schema: {
     rooms: { id: 'rooms.id', code: 'rooms.code' },
-    players: { id: 'players.id', roomId: 'players.roomId', name: 'players.name', isHost: 'players.isHost' },
+    players: {
+      id: 'players.id',
+      roomId: 'players.roomId',
+      name: 'players.name',
+      isHost: 'players.isHost',
+    },
     questions: {},
     games: {},
     turns: {},
@@ -78,7 +77,7 @@ function createMockDb(): DbInstance {
         if (colStr.includes('roomId')) {
           // Support both single roomId (eq) and array of roomIds (inArray)
           const roomIds = Array.isArray(lookupVal) ? lookupVal : [lookupVal]
-          return Array.from(store.players.values()).filter(p => roomIds.includes(p.roomId))
+          return Array.from(store.players.values()).filter((p) => roomIds.includes(p.roomId))
         }
         if (colStr.includes('status')) {
           return Array.from(store.rooms.values())
@@ -133,6 +132,7 @@ function createMockDb(): DbInstance {
         where: vi.fn(() => ({})),
       })),
     })),
+    run: vi.fn(),
   }
   return db as unknown as DbInstance
 }
@@ -255,6 +255,42 @@ describe('joinRoom', () => {
     }
   })
 
+  it('should reject joining a full room', async () => {
+    const db = createMockDb()
+    const created = await createRoom(db, { name: 'Test', hostName: 'Alice' })
+    // Room has maxPlayers=2, so first join should work
+    await joinRoom(db, { roomId: created.id, playerName: 'Bob' })
+    // Second join should be rejected
+    const result = await joinRoom(db, {
+      roomId: created.id,
+      playerName: 'Charlie',
+    })
+
+    expect('error' in result).toBe(true)
+    if ('error' in result) {
+      expect(result.error).toContain('full')
+    }
+  })
+
+  it('should reject joining a room that is not waiting', async () => {
+    const db = createMockDb()
+    const created = await createRoom(db, { name: 'Test', hostName: 'Alice' })
+    // Manually set room status to 'playing'
+    created.status = 'playing'
+    ;(created as any).passwordHash = null
+    store.rooms.set(created.id, { ...created, status: 'playing' })
+
+    const result = await joinRoom(db, {
+      roomId: created.id,
+      playerName: 'Bob',
+    })
+
+    expect('error' in result).toBe(true)
+    if ('error' in result) {
+      expect(result.error).toContain('not accepting')
+    }
+  })
+
   it('should reject duplicate name in the same room', async () => {
     const db = createMockDb()
     const created = await createRoom(db, { name: 'Test', hostName: 'Alice' })
@@ -324,5 +360,120 @@ describe('listActiveRooms', () => {
 
     const rooms = await listActiveRooms(db)
     expect(rooms.length).toBe(2)
+  })
+
+  it('should return a room with an empty players list when it has no players', async () => {
+    const db = createMockDb()
+    // Insert a room row directly, with no player rows at all
+    db.insert({
+      id: 'r-orphan',
+      code: 'ZZZ123',
+      name: 'Empty Room',
+      hostName: 'Nobody',
+      maxPlayers: 2,
+      passwordHash: null,
+      status: 'waiting',
+      createdAt: new Date(),
+    } as any).values({
+      id: 'r-orphan',
+      code: 'ZZZ123',
+      name: 'Empty Room',
+      hostName: 'Nobody',
+      maxPlayers: 2,
+      passwordHash: null,
+      status: 'waiting',
+      createdAt: new Date(),
+    })
+
+    const rooms = await listActiveRooms(db)
+    const empty = rooms.find((r) => r.id === 'r-orphan')
+    expect(empty).toBeDefined()
+    expect(empty!.players).toEqual([])
+  })
+})
+
+describe('createRoom unique violation handling', () => {
+  it('should retry when code collides with a unique constraint', async () => {
+    const db = createMockDb()
+    // Make the first insert throw a unique violation, second succeeds
+    let insertCount = 0
+    const origInsert = db.insert as any
+    db.insert = vi.fn(() => {
+      insertCount++
+      if (insertCount === 1) {
+        throw new Error('UNIQUE constraint failed: rooms.code')
+      }
+      return origInsert()
+    }) as any
+
+    const room = await createRoom(db, { name: 'Test', hostName: 'Alice' })
+    expect(room).toBeDefined()
+    expect(room.name).toBe('Test')
+    expect(insertCount).toBeGreaterThan(1)
+  })
+
+  it('should rethrow non-unique errors', async () => {
+    const db = createMockDb()
+    db.insert = vi.fn(() => {
+      throw new Error('Database exploded')
+    }) as any
+
+    await expect(createRoom(db, { name: 'Test', hostName: 'Alice' })).rejects.toThrow(
+      'Database exploded',
+    )
+  })
+
+  it('should clean up orphaned room when player insert fails', async () => {
+    const db = createMockDb()
+    const origInsert = db.insert as any
+    const deleteSpy = db.delete as any
+
+    // First insert (room) succeeds, second insert (player) throws
+    let insertCount = 0
+    db.insert = vi.fn(() => {
+      insertCount++
+      if (insertCount === 1) return origInsert()
+      throw new Error('Player insert failed')
+    }) as any
+
+    await expect(createRoom(db, { name: 'Test', hostName: 'Alice' })).rejects.toThrow(
+      'Player insert failed',
+    )
+    expect(deleteSpy).toHaveBeenCalled()
+  })
+})
+
+describe('joinRoom unique violation handling', () => {
+  it('should return name taken error on unique violation during join', async () => {
+    const db = createMockDb()
+    const created = await createRoom(db, { name: 'Test', hostName: 'Alice' })
+
+    // Make player insert throw a unique constraint violation
+    db.insert = vi.fn(() => {
+      throw new Error('UNIQUE constraint failed: players.room_id, players.name')
+    }) as any
+
+    const result = await joinRoom(db, {
+      roomId: created.id,
+      playerName: 'Bob',
+    })
+
+    expect('error' in result).toBe(true)
+    if ('error' in result) {
+      expect(result.error).toContain('already taken')
+    }
+  })
+
+  it('should rethrow non-unique errors during join', async () => {
+    const db = createMockDb()
+    const created = await createRoom(db, { name: 'Test', hostName: 'Alice' })
+
+    db.insert = vi.fn(() => {
+      throw new Error('Database exploded')
+    }) as any
+
+    await expect(joinRoom(db, { roomId: created.id, playerName: 'Bob' })).rejects.toThrow(
+      'Database exploded',
+    )
   })
 })

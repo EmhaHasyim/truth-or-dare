@@ -1,0 +1,9 @@
+/*
+  # The 'sha256-...' in script-src allows the inline theme-restore script in
+  # index.html (CSP blocks inline scripts without a hash/nonce). If you edit
+  # that script, recompute the hash (sha256 base64 of its exact content).
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'sha256-SdTEFq1Doi0f4E1hFtoonVAibbbrTftk4IfnB5Medww='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' wss: ws:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=()

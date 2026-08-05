@@ -47,7 +47,7 @@ function resolve(condition: any, table: 'rooms' | 'players') {
 }
 
 // ── Build a mock query builder that reads/writes the shared store ──
-function makeDb() {
+function makeDb(): any {
   return {
     insert: vi.fn((_: any) => ({
       values: vi.fn((values: any) => ({
@@ -86,6 +86,7 @@ function makeDb() {
     })),
     delete: vi.fn(() => ({ where: vi.fn(() => ({})) })),
     update: vi.fn(() => ({ set: vi.fn(() => ({ where: vi.fn(() => ({})) })) })),
+    run: vi.fn(),
   }
 }
 
@@ -95,13 +96,7 @@ vi.mock('drizzle-orm/d1', () => ({
   drizzle: vi.fn(() => makeDb()),
 }))
 
-import {
-  createRoom,
-  getRoomById,
-  getRoomByCode,
-  joinRoom,
-  listActiveRooms,
-} from '../api/rooms'
+import { createRoom, getRoomById, getRoomByCode, joinRoom, listActiveRooms } from '../api/rooms'
 import { MAX_PLAYERS } from '../constants'
 
 beforeEach(() => {
@@ -127,7 +122,7 @@ describe('integration: room lifecycle', () => {
     expect('error' in joinRes).toBe(false)
 
     const active = await listActiveRooms(db)
-    expect(active.some(r => r.id === room.id)).toBe(true)
+    expect(active.some((r) => r.id === room.id)).toBe(true)
   })
 
   it('password protected room', async () => {
@@ -154,7 +149,7 @@ describe('integration: room lifecycle', () => {
     expect(store.players.size).toBe(2)
 
     // Verify players in store have correct roomId
-    for (const [id, p] of store.players) {
+    for (const [, p] of store.players) {
       expect(p.roomId).toBe(room.id)
     }
 

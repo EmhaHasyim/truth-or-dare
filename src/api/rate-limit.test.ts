@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
 import type { Next } from 'hono'
 
 // Helper to create a minimal mock Hono context
@@ -39,6 +39,10 @@ describe('rateLimit middleware', () => {
       expect(result).toBeUndefined()
     }
     expect(next).toHaveBeenCalledTimes(29)
+  })
+
+  afterAll(() => {
+    vi.restoreAllMocks()
   })
 
   it('should block requests over the limit', async () => {
@@ -145,5 +149,44 @@ describe('rateLimit middleware', () => {
     const blocked = await rateLimit(ctx, next)
     expect(blocked).toBeInstanceOf(Response)
     expect((blocked as Response).status).toBe(429)
+  })
+
+  it('should prune expired clients when tracking many IPs', async () => {
+    const { rateLimit } = await import('./rate-limit')
+    const next: Next = vi.fn()
+
+    // Add more than MAX_TRACKED_CLIENTS (10_000) distinct clients
+    for (let i = 0; i < 10_001; i++) {
+      const ctx = createCtx(`10.9.9.${i}`) as any
+      await rateLimit(ctx, next)
+    }
+
+    // Advance past the window so all entries are fully expired
+    vi.advanceTimersByTime(61_000)
+
+    // Trigger another request — should prune and still work
+    const fresh = createCtx('10.9.9.99999') as any
+    const result = await rateLimit(fresh, next)
+    expect(result).toBeUndefined()
+  })
+
+  it('should not prune clients with recent activity', async () => {
+    const { rateLimit } = await import('./rate-limit')
+    const next: Next = vi.fn()
+
+    // Add many clients, then add a fresh one
+    for (let i = 0; i < 10_001; i++) {
+      const ctx = createCtx(`10.8.8.${i}`) as any
+      await rateLimit(ctx, next)
+    }
+
+    // Fresh activity right before the sweep
+    const recent = createCtx('10.8.8.99999') as any
+    await rateLimit(recent, next)
+
+    // Advance some time but not past the full window for the recent client
+    vi.advanceTimersByTime(30_000)
+    const result = await rateLimit(recent, next)
+    expect(result).toBeUndefined()
   })
 })

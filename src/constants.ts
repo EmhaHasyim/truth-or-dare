@@ -16,3 +16,12 @@ export const TURN_TIMEOUT_MS = 60_000
 
 /** Grace period (ms) to wait for players to reconnect before ending the game when all disconnect */
 export const DISCONNECT_GRACE_MS = 15_000
+
+/**
+ * Waiting rooms with no activity for this long are removed by the hourly cron.
+ * `last_active_at` is bumped whenever a player connects to the room's DO.
+ */
+export const STALE_ROOM_AGE_MS = 6 * 60 * 60 * 1000
+
+/** Finished rooms older than this are purged by the hourly cron. */
+export const FINISHED_ROOM_AGE_MS = 24 * 60 * 60 * 1000

@@ -1,18 +1,28 @@
 @import 'tailwindcss';
 @plugin 'daisyui' {
-  themes: cupcake --default, dark --prefersdark, autumn, forest, aqua, valentine;
+  themes:
+    cupcake --default,
+    dark --prefersdark,
+    autumn,
+    forest,
+    aqua,
+    valentine;
 }
 
 * {
   box-sizing: border-box;
 }
 
-html, body, #app {
+html,
+body,
+#app {
   min-height: 100svh;
 }
 /* Fallback: 100dvh jika didukung (lebih akurat di mobile dengan toolbar dinamis) */
 @supports (min-height: 100dvh) {
-  html, body, #app {
+  html,
+  body,
+  #app {
     min-height: 100dvh;
   }
 }
@@ -54,13 +64,21 @@ body {
 }
 
 /* ── Prevent text selection on interactive elements ── */
-.btn, .card, .input, textarea, select, [role="button"], .modal-box {
+.btn,
+.card,
+.input,
+textarea,
+select,
+[role='button'],
+.modal-box {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
 }
 
-input, textarea, .selectable-text {
+input,
+textarea,
+.selectable-text {
   -webkit-user-select: text;
   user-select: text;
 }
@@ -82,13 +100,25 @@ input, textarea, .selectable-text {
 }
 
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes slideUp {
-  from { opacity: 0; transform: translateY(20px) scale(0.97); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 /* ── Page route transitions ── */
@@ -100,13 +130,33 @@ input, textarea, .selectable-text {
 }
 
 @keyframes pageEnter {
-  0%   { opacity: 0; transform: translateY(16px) scale(0.97); filter: blur(4px); }
-  60%  { opacity: 1; transform: translateY(-2px) scale(1.002); filter: blur(0); }
-  100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+  0% {
+    opacity: 0;
+    transform: translateY(16px) scale(0.97);
+    filter: blur(4px);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1.002);
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
 }
 @keyframes pageExit {
-  from { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
-  to   { opacity: 0; transform: translateY(-8px) scale(0.97); filter: blur(2px); }
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.97);
+    filter: blur(2px);
+  }
 }
 
 /* ── View transitions ── */
@@ -118,12 +168,24 @@ input, textarea, .selectable-text {
 }
 
 @keyframes viewEnter {
-  from { opacity: 0; transform: translateY(14px) scale(0.96); }
-  to   { opacity: 1; transform: translateY(0) scale(1); }
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 @keyframes viewExit {
-  from { opacity: 1; transform: translateY(0) scale(1); }
-  to   { opacity: 0; transform: translateY(-8px) scale(0.96); }
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.96);
+  }
 }
 
 /* ── Toast slide-up ── */
@@ -132,8 +194,14 @@ input, textarea, .selectable-text {
 }
 
 @keyframes slideUpToast {
-  from { opacity: 0; transform: translateY(16px) scale(0.92); }
-  to   { opacity: 1; transform: translateY(0) scale(1); }
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 /* ── Progress bar ── */
@@ -141,8 +209,12 @@ input, textarea, .selectable-text {
   animation: shrink 2.8s linear forwards;
 }
 @keyframes shrink {
-  from { width: 100%; }
-  to { width: 0%; }
+  from {
+    width: 100%;
+  }
+  to {
+    width: 0%;
+  }
 }
 
 /* ── Scale press effect for buttons ── */
@@ -152,11 +224,13 @@ input, textarea, .selectable-text {
 
 /* ── Card hover ── */
 .card-hover {
-  transition: transform 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out);
+  transition:
+    transform 0.2s var(--ease-out),
+    box-shadow 0.2s var(--ease-out);
 }
 .card-hover:hover {
   transform: translateY(-3px);
-  box-shadow: 0 12px 28px rgba(0,0,0,0.08);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.08);
 }
 .card-hover:active {
   transform: scale(0.97);
@@ -164,13 +238,13 @@ input, textarea, .selectable-text {
 
 /* ── Glass effect ── */
 .glass-panel {
-  background: rgba(255,255,255,0.6);
+  background: rgba(255, 255, 255, 0.6);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
 }
 
-[data-theme="dark"] .glass-panel {
-  background: rgba(0,0,0,0.3);
+[data-theme='dark'] .glass-panel {
+  background: rgba(0, 0, 0, 0.3);
 }
 
 /* ── Optimize animated elements for GPU ── */
@@ -185,8 +259,13 @@ input, textarea, .selectable-text {
   animation: pulse-dot 2s ease-in-out infinite;
 }
 @keyframes pulse-dot {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
 }
 
 /* ── Gradient text ── */
@@ -199,25 +278,39 @@ input, textarea, .selectable-text {
 
 /* ── Shimmer loading ── */
 @keyframes shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
 }
 .shimmer {
-  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.15) 50%, transparent 100%);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.15) 50%,
+    transparent 100%
+  );
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
 }
 
 /* ── Keyboard avoid ── */
 @media (max-width: 768px) {
-  input, textarea, select, [contenteditable] {
+  input,
+  textarea,
+  select,
+  [contenteditable] {
     font-size: 16px !important;
   }
 }
 
 /* ── Respect reduced motion ── */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

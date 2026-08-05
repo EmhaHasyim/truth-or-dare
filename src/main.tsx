@@ -19,5 +19,5 @@ render(
       <RouterProvider router={router} />
     </QueryClientProvider>
   ),
-  document.getElementById('app')!
+  document.getElementById('app')!,
 )
